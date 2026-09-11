@@ -1,0 +1,75 @@
+menu "Remote GNSS"
+
+    menu "WiFi"
+
+        config RGNSS_AP_SSID
+            string "Access point name"
+            default "remote-gnss"
+            help
+                Open (passwordless) access point the device brings up when it has no
+                station network, or can't reach it. Station credentials come from the
+                web page, or else from WIFI_STA_SSID / WIFI_STA_PASSWORD in
+                main/wifi_credentials.h.
+
+        config RGNSS_AP_CHANNEL
+            int "Access point channel"
+            range 1 13
+            default 1
+
+        config RGNSS_AP_MAX_CONN
+            int "Access point max clients"
+            range 1 10
+            default 4
+
+        config RGNSS_STA_FALLBACK_S
+            int "Seconds without a station connection before the access point comes up"
+            range 5 600
+            default 30
+
+    endmenu
+
+    config RGNSS_HOSTNAME
+        string "mDNS hostname (without .local)"
+        default "gnss-haydamaka"
+        help
+            A single label: ESP-IDF's mDNS responder writes a dotted name such as
+            "gnss.haydamaka" into its replies as one label, which resolvers reject.
+
+    config RGNSS_HTTP_PORT
+        int "Web server port"
+        range 1 65535
+        default 80
+
+    menu "GNSS"
+
+        config RGNSS_GNSS_RX_GPIO
+            int "UART RX GPIO (receiver TX)"
+            range 0 21
+            default 4
+
+        config RGNSS_GNSS_TX_GPIO
+            int "UART TX GPIO (receiver RX)"
+            range 0 21
+            default 3
+
+        config RGNSS_GNSS_BAUD
+            int "Baud rate"
+            default 115200
+
+    endmenu
+
+    menu "Magnetometer"
+
+        config RGNSS_MAG_SDA_GPIO
+            int "I2C SDA GPIO"
+            range 0 21
+            default 1
+
+        config RGNSS_MAG_SCL_GPIO
+            int "I2C SCL GPIO"
+            range 0 21
+            default 0
+
+    endmenu
+
+endmenu

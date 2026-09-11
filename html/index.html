@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>remote-gnss</title>
+<style>
+  :root {
+    --bg: #f4f4f1; --card: #fff; --fg: #1c1c1a; --muted: #6a6a64; --line: #e3e3dd;
+    --accent: #1f6feb; --ok: #1a7f37; --warn: #a15c00; --bad: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --card: #1f1f1e; --fg: #ececea; --muted: #9a9a93; --line: #33332f;
+      --accent: #4d8ff5; --ok: #3fb950; --warn: #e0a33a; --bad: #ef5350;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, sans-serif; }
+  header {
+    position: sticky; top: 0; display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--line);
+  }
+  h1 { flex: 1; margin: 0; font-size: 17px; }
+  nav { display: flex; gap: 4px; }
+  nav button {
+    padding: 6px 14px; border: 0; border-radius: 8px; background: none;
+    color: var(--muted); font: inherit; font-weight: 600; cursor: pointer;
+  }
+  nav button[aria-selected="true"] { background: var(--bg); color: var(--fg); }
+  #offline { padding: 8px 16px; background: var(--bad); color: #fff; text-align: center; }
+  main { max-width: 560px; margin: 0 auto; padding: 16px; }
+  section { margin-bottom: 16px; padding: 4px 16px 8px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+  h2 { margin: 12px 0 2px; color: var(--muted); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  .status { margin: 4px 0 10px; font-weight: 600; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 7px 0; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
+  th { width: 38%; color: var(--muted); font-weight: normal; }
+  td { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .note { margin: 8px 0; color: var(--muted); font-size: 13px; }
+  label { display: block; margin: 12px 0 4px; color: var(--muted); }
+  input {
+    width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg); color: var(--fg); font: inherit;
+  }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 8px; }
+  .buttons button { padding: 9px 16px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+  .primary { border: 0; background: var(--accent); color: #fff; }
+  .secondary { border: 1px solid var(--line); background: none; color: var(--fg); }
+  #msg:empty { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>remote-gnss</h1>
+  <nav role="tablist">
+    <button role="tab" data-tab="gnss" aria-selected="true">GNSS</button>
+    <button role="tab" data-tab="wifi" aria-selected="false">WiFi</button>
+  </nav>
+</header>
+<div id="offline" hidden>The device isn't responding</div>
+
+<main>
+  <div id="panel-gnss" role="tabpanel">
+    <section>
+      <h2>Position</h2>
+      <p class="status" id="gnss-status">Loading…</p>
+      <table>
+        <tr><th>Latitude</th><td id="lat">—</td></tr>
+        <tr><th>Longitude</th><td id="lon">—</td></tr>
+        <tr><th>Altitude</th><td id="alt">—</td></tr>
+        <tr><th>Satellites</th><td id="sats">—</td></tr>
+        <tr><th>HDOP</th><td id="hdop">—</td></tr>
+        <tr><th>Speed</th><td id="speed">—</td></tr>
+        <tr><th>Course</th><td id="course">—</td></tr>
+        <tr><th>Time</th><td id="utc">—</td></tr>
+      </table>
+    </section>
+    <section>
+      <h2>Magnetometer</h2>
+      <p class="status" id="mag-status">Loading…</p>
+      <table>
+        <tr><th>X</th><td id="mx">—</td></tr>
+        <tr><th>Y</th><td id="my">—</td></tr>
+        <tr><th>Z</th><td id="mz">—</td></tr>
+        <tr><th>Magnitude</th><td id="mb">—</td></tr>
+        <tr><th>Heading</th><td id="mh">—</td></tr>
+      </table>
+      <p class="note">Raw sensor axes, uncalibrated. The heading is atan2(Y, X), valid only with the module held flat.</p>
+    </section>
+  </div>
+
+  <div id="panel-wifi" role="tabpanel" hidden>
+    <section>
+      <h2>Status</h2>
+      <table>
+        <tr><th>Network</th><td id="w-sta">—</td></tr>
+        <tr><th>Address</th><td id="w-ip">—</td></tr>
+        <tr><th>Access point</th><td id="w-ap">—</td></tr>
+        <tr><th>Hostname</th><td id="w-host">—</td></tr>
+      </table>
+    </section>
+    <section>
+      <h2>Join a network</h2>
+      <form id="wifi-form">
+        <label for="ssid">Network name</label>
+        <input id="ssid" name="ssid" required maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" minlength="8" maxlength="63"
+               autocomplete="new-password" placeholder="Leave empty for an open network">
+        <div class="buttons">
+          <button class="primary" type="submit">Save and restart</button>
+          <button class="secondary" type="button" id="forget" hidden>Forget this network</button>
+        </div>
+      </form>
+      <p class="note" id="wifi-note"></p>
+      <p class="status" id="msg" role="status"></p>
+    </section>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const DASH = '—';
+const QUALITY = {1: 'GPS fix', 2: 'DGPS fix', 4: 'RTK fixed', 5: 'RTK float', 6: 'Dead reckoning'};
+
+function selectTab(name) {
+  for (const b of document.querySelectorAll('[role=tab]')) {
+    b.setAttribute('aria-selected', b.dataset.tab === name);
+  }
+  $('panel-gnss').hidden = name !== 'gnss';
+  $('panel-wifi').hidden = name !== 'wifi';
+  history.replaceState(null, '', name === 'gnss' ? location.pathname : '#' + name);
+}
+for (const b of document.querySelectorAll('[role=tab]')) {
+  b.onclick = () => selectTab(b.dataset.tab);
+}
+selectTab(location.hash === '#wifi' ? 'wifi' : 'gnss');
+
+const num = (v, digits, unit = '') => v == null ? DASH : v.toFixed(digits) + unit;
+const coord = (v, pos, neg) => v == null ? DASH : `${Math.abs(v).toFixed(7)}° ${v < 0 ? neg : pos}`;
+
+function status(el, text, cls) {
+  el.textContent = text;
+  el.className = 'status ' + cls;
+}
+
+function renderGnss(g) {
+  const el = $('gnss-status');
+  if (g.age_ms == null || g.age_ms > 3000) {
+    status(el, 'No data from the GNSS receiver', 'bad');
+  } else if (!g.fix) {
+    status(el, `No fix yet · ${g.sats} satellites`, 'warn');
+  } else {
+    status(el, `${QUALITY[g.quality] || 'Fix'} · ${g.sats} satellites`, 'ok');
+  }
+  $('lat').textContent = coord(g.lat, 'N', 'S');
+  $('lon').textContent = coord(g.lon, 'E', 'W');
+  $('alt').textContent = num(g.alt, 1, ' m');
+  $('sats').textContent = g.sentences ? g.sats : DASH;
+  $('hdop').textContent = num(g.hdop, 2);
+  $('speed').textContent = num(g.speed_kmh, 1, ' km/h');
+  $('course').textContent = num(g.course, 1, '°');
+  $('utc').textContent = g.utc ? g.utc + ' UTC' : DASH;
+}
+
+function renderMag(m) {
+  const el = $('mag-status');
+  if (!m.chip) {
+    status(el, 'Magnetometer not detected', 'bad');
+  } else if (m.age_ms == null || m.age_ms > 1000) {
+    status(el, `${m.chip} · no recent readings`, 'warn');
+  } else {
+    status(el, m.chip, 'ok');
+  }
+  const ok = m.x != null;
+  $('mx').textContent = num(m.x, 2, ' µT');
+  $('my').textContent = num(m.y, 2, ' µT');
+  $('mz').textContent = num(m.z, 2, ' µT');
+  $('mb').textContent = ok ? num(Math.hypot(m.x, m.y, m.z), 2, ' µT') : DASH;
+  $('mh').textContent = ok ? num((Math.atan2(m.y, m.x) * 180 / Math.PI + 360) % 360, 1, '°') : DASH;
+}
+
+function renderWifi(w) {
+  const source = w.sta_saved ? 'set here' : 'built in';
+  $('w-sta').textContent = !w.sta_configured ? 'None configured'
+    : w.sta_connected ? `Connected to "${w.sta_ssid}" (${source}) · ${w.rssi} dBm`
+    : `Connecting to "${w.sta_ssid}" (${source})…`;
+  $('w-ip').textContent = w.sta_connected ? w.sta_ip : DASH;
+  $('w-ap').textContent = w.ap ? `On · "${w.ap_ssid}", open · 192.168.4.1` : 'Off';
+  $('w-host').textContent = w.hostname;
+  $('forget').hidden = !w.sta_saved;
+  $('wifi-note').textContent = `Saving restarts the device. If it can't connect within ${w.fallback_s} s, ` +
+    `the open access point "${w.ap_ssid}" comes up.`;
+}
+
+let hostname = '';
+
+async function poll() {
+  try {
+    const r = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(3000)});
+    const s = await r.json();
+    hostname = s.wifi.hostname;
+    renderGnss(s.gnss);
+    renderMag(s.mag);
+    renderWifi(s.wifi);
+    $('offline').hidden = true;
+  } catch {
+    $('offline').hidden = false;
+  }
+  setTimeout(poll, 1000);
+}
+poll();
+
+async function post(url, body, done) {
+  const msg = $('msg');
+  status(msg, 'Saving…', '');
+  try {
+    const r = await fetch(url, {method: 'POST', body});
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || r.statusText);
+    status(msg, done, 'ok');
+  } catch (err) {
+    status(msg, 'Failed: ' + err.message, 'bad');
+  }
+}
+
+$('wifi-form').onsubmit = e => {
+  e.preventDefault();
+  const ssid = $('ssid').value;
+  post('/api/wifi', new URLSearchParams(new FormData(e.target)),
+       `Saved. Restarting to join "${ssid}"; once it's on, open http://${hostname}/ from that network.`);
+};
+
+$('forget').onclick = () => {
+  if (!confirm('Forget this network? The device restarts and uses the built-in network, or its access point.')) return;
+  post('/api/wifi/forget', null, 'Forgotten. Restarting…');
+};
+</script>
+</body>
+</html>
