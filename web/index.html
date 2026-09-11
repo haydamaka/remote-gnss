@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Magnetometer Viewer</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #f4f4f0; color: #222; font: 13px sans-serif; }
+    #panel { position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,.85); padding: 10px; border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+    #panel > div { margin: 4px 0; }
+    input { width: 220px; }
+  </style>
+  <script type="importmap">
+    { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+<div id="panel">
+  <div>
+    <input id="wsUrl" value="ws://192.168.4.1:81/">
+    <button id="connect">Connect</button>
+  </div>
+  <div>
+    <label><input id="simulate" type="checkbox" checked style="width:auto"> Simulate</label>
+    <button id="clear">Clear</button>
+    <button id="fit">Fit view</button>
+  </div>
+  <div id="status">Simulating</div>
+  <div id="last"></div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const MAX_POINTS = 5000;
+
+// --- Scene ---
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf4f4f0);
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 1e6);
+camera.position.set(150, 100, 150);
+const controls = new OrbitControls(camera, renderer.domElement);
+
+const axes = new THREE.AxesHelper(1); // X red, Y green, Z blue
+scene.add(axes);
+
+// Point cloud in a ring buffer
+const positions = new Float32Array(MAX_POINTS * 3);
+const colors = new Float32Array(MAX_POINTS * 3);
+const geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+geometry.setDrawRange(0, 0);
+const points = new THREE.Points(geometry, new THREE.PointsMaterial({ size: 6, sizeAttenuation: false, vertexColors: true }));
+scene.add(points);
+
+// Arrow showing the latest reading
+const arrow = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0x333333);
+scene.add(arrow);
+
+// Point colors by height: blue (bottom) -> green (equator) -> yellow (top)
+const BLUE = new THREE.Color(0x1f5fbf), GREEN = new THREE.Color(0x1a9e6a), YELLOW = new THREE.Color(0xd9a400);
+const color = new THREE.Color();
+
+let count = 0, next = 0, fittedRadius = 0;
+
+// Entry point for every reading (simulated or from WebSocket)
+function addPoint(x, y, z) {
+  const i = next * 3;
+  positions.set([x, y, z], i);
+  const len = Math.hypot(x, y, z) || 1;
+  const t = (z / len + 1) / 2; // 0 = pointing down, 1 = pointing up
+  if (t < 0.5) color.lerpColors(BLUE, GREEN, t * 2);
+  else color.lerpColors(GREEN, YELLOW, t * 2 - 1);
+  colors.set([color.r, color.g, color.b], i);
+
+  next = (next + 1) % MAX_POINTS;
+  count = Math.min(count + 1, MAX_POINTS);
+  geometry.setDrawRange(0, count);
+  geometry.attributes.position.needsUpdate = true;
+  geometry.attributes.color.needsUpdate = true;
+
+  const v = new THREE.Vector3(x, y, z);
+  arrow.setDirection(v.clone().normalize());
+  arrow.setLength(len, len * 0.1, len * 0.05);
+
+  if (len > fittedRadius * 1.2) fitView();
+
+  document.getElementById('last').textContent =
+    `x=${x.toFixed(2)} y=${y.toFixed(2)} z=${z.toFixed(2)} |B|=${len.toFixed(2)}  (${count} pts)`;
+}
+
+function fitView() {
+  if (!count) return;
+  geometry.computeBoundingSphere();
+  const { center, radius } = geometry.boundingSphere;
+  fittedRadius = Math.max(fittedRadius, center.length() + radius);
+  axes.scale.setScalar(fittedRadius * 1.2);
+  controls.target.copy(center);
+  camera.position.copy(center).add(new THREE.Vector3(1, 0.7, 1).setLength(fittedRadius * 3));
+  controls.update();
+}
+
+function clearPoints() {
+  count = next = fittedRadius = 0;
+  geometry.setDrawRange(0, 0);
+}
+
+// --- Simulator: random points on a sphere with hard-iron offset and noise ---
+const SIM_RADIUS = 50;                          // e.g. Earth field ~50 uT
+const SIM_OFFSET = new THREE.Vector3(12, -7, 5); // hard-iron offset
+const SIM_NOISE = 0.5;
+
+function gaussian() {
+  return Math.sqrt(-2 * Math.log(1 - Math.random())) * Math.cos(2 * Math.PI * Math.random());
+}
+
+setInterval(() => {
+  if (!document.getElementById('simulate').checked) return;
+  const dir = new THREE.Vector3(gaussian(), gaussian(), gaussian()).normalize();
+  const p = dir.multiplyScalar(SIM_RADIUS).add(SIM_OFFSET);
+  addPoint(p.x + gaussian() * SIM_NOISE, p.y + gaussian() * SIM_NOISE, p.z + gaussian() * SIM_NOISE);
+}, 20);
+
+// --- WebSocket: accepts {"x":1,"y":2,"z":3} or "1,2,3" per message ---
+let ws = null;
+const status = document.getElementById('status');
+
+document.getElementById('connect').onclick = () => {
+  if (ws) { ws.close(); return; }
+  ws = new WebSocket(document.getElementById('wsUrl').value);
+  status.textContent = 'Connecting...';
+  ws.onopen = () => {
+    status.textContent = 'Connected';
+    document.getElementById('connect').textContent = 'Disconnect';
+    document.getElementById('simulate').checked = false;
+    clearPoints();
+  };
+  ws.onclose = () => {
+    status.textContent = 'Disconnected';
+    document.getElementById('connect').textContent = 'Connect';
+    ws = null;
+  };
+  ws.onmessage = (e) => {
+    const text = String(e.data).trim();
+    const [x, y, z] = text.startsWith('{')
+      ? (({ x, y, z }) => [x, y, z])(JSON.parse(text))
+      : text.split(',').map(Number);
+    if ([x, y, z].every(Number.isFinite)) addPoint(x, y, z);
+  };
+};
+
+document.getElementById('clear').onclick = clearPoints;
+document.getElementById('fit').onclick = fitView;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
