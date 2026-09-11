@@ -1,0 +1,9 @@
+build/
+cmake-build-*/
+managed_components/
+dependencies.lock
+sdkconfig
+sdkconfig.old
+
+.idea/*
+!.idea/cmake.xml
