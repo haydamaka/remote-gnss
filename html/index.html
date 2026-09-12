@@ -369,18 +369,6 @@ function renderWifi(w) {
   $('w-ap').textContent = w.ap ? `On · "${w.ap_ssid}", open · 192.168.4.1` : 'Off';
   $('w-host').textContent = w.hostname;
 
-  const ble = d.ble || {};
-  const bleSection = $('ble-pref').closest('section');
-  if (!ble.available) {
-    bleSection.hidden = true;
-  } else {
-    bleSection.hidden = false;
-    $('ble-pref').textContent = ble.preferred ? 'Bluetooth' : 'WiFi';
-    document.querySelectorAll('.ble-name').forEach(e => e.textContent = w.hostname.replace(/\.local$/, ''));
-    document.querySelectorAll('.ble-host').forEach(e => e.textContent = w.hostname);
-    $('ble-off').hidden = !ble.preferred;
-    if (ble.idle_s) $('ble-idle').textContent = `${ble.idle_s} s`;
-  }
   $('forget').hidden = !w.sta_saved;
   // Pre-fill the network name once; never overwrite what's being typed.
   const ssid = $('ssid');
@@ -390,6 +378,23 @@ function renderWifi(w) {
   }
   $('wifi-note').textContent = `Saving restarts the device. If it can't connect within ${w.fallback_s} s, ` +
     `the open access point "${w.ap_ssid}" comes up.`;
+}
+
+// Takes the whole status: it needs the hostname from the WiFi section as well.
+function renderBle(ble, wifi) {
+  ble = ble || {};
+  const section = $('ble-pref').closest('section');
+  const phone = $('ble-pref').closest('section').nextElementSibling;
+  section.hidden = !ble.available;
+  if (phone) phone.hidden = !ble.available;
+  if (!ble.available) return;
+
+  $('ble-pref').textContent = ble.preferred ? 'Bluetooth' : 'WiFi';
+  $('ble-off').hidden = !ble.preferred;
+  if (ble.idle_s) $('ble-idle').textContent = `${ble.idle_s} s`;
+  const host = wifi.hostname || '';
+  document.querySelectorAll('.ble-name').forEach(e => e.textContent = host.replace(/\.local$/, ''));
+  document.querySelectorAll('.ble-host').forEach(e => e.textContent = host);
 }
 
 function renderSystem(sys) {
@@ -408,6 +413,7 @@ async function poll() {
     renderGnss(s.gnss);
     renderMag(s.mag);
     renderWifi(s.wifi);
+    renderBle(s.ble, s.wifi);
     renderSystem(s.system);
     $('offline').hidden = true;
   } catch {
