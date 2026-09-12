@@ -108,7 +108,7 @@
   <h1>remote-gnss</h1>
   <nav role="tablist">
     <button role="tab" data-tab="gnss" aria-selected="true">GNSS</button>
-    <button role="tab" data-tab="wifi" aria-selected="false">WiFi</button>
+    <button role="tab" data-tab="wifi" aria-selected="false">WiFi/BLE</button>
   </nav>
 </header>
 <div id="offline" hidden>The device isn't responding</div>
@@ -215,6 +215,73 @@
       <p class="note" id="wifi-note"></p>
       <p class="status" id="msg" role="status"></p>
     </section>
+    <section>
+      <h2>Bluetooth</h2>
+      <p class="note">
+        The ESP32-C3 has one radio, so the device does WiFi <em>or</em> Bluetooth, never
+        both. Bluetooth here is BLE with the Nordic UART Service &mdash; this chip has no
+        Bluetooth Classic, so apps that pair with a &ldquo;serial&rdquo; GPS will not find
+        it.
+      </p>
+      <table>
+        <tr><th>Starts on</th><td id="ble-pref">&mdash;</td></tr>
+      </table>
+      <div class="buttons">
+        <button class="secondary" type="button" id="ble-on">Switch to Bluetooth</button>
+        <button class="secondary" type="button" id="ble-off" hidden>Start on WiFi instead</button>
+      </div>
+      <p class="status" id="ble-msg" role="status"></p>
+      <h3>What happens when you switch</h3>
+      <ol class="note">
+        <li>WiFi stops and <strong>this page stops responding</strong>. That is expected.</li>
+        <li>The device advertises as <code class="ble-name">gnss-haydamaka</code> and serves
+            the same NMEA sentences over BLE.</li>
+        <li>The choice is remembered, so it starts on Bluetooth from now on.</li>
+        <li>Once nothing has been connected over Bluetooth for
+            <span id="ble-idle">a couple of minutes</span>, the radio goes back to WiFi and
+            this page returns. A restart does the same.</li>
+      </ol>
+      <p class="note">
+        So Bluetooth cannot leave the device unreachable &mdash; it always comes back on its
+        own. To stop it starting on Bluetooth, come back here and press &ldquo;Start on WiFi
+        instead&rdquo;.
+      </p>
+    </section>
+    <section>
+      <h2>Using it from a phone</h2>
+      <p class="note">
+        Android apps do not read a GNSS receiver directly. A bridge app reads it and
+        publishes the position as the system <em>mock location provider</em>, after which
+        every other app &mdash; Maps, OsmAnd, a survey app &mdash; uses this device instead
+        of the phone's own GPS.
+      </p>
+      <h3>Over Bluetooth</h3>
+      <ol class="note">
+        <li>Install <strong>GPS Connector</strong>, which speaks both BLE and TCP. GNSS
+            Master and SW Maps work the same way.</li>
+        <li>On this page, press <strong>Switch to Bluetooth</strong>.</li>
+        <li>In Android, unlock Developer options: Settings &rarr; About phone &rarr; tap
+            <em>Build number</em> seven times.</li>
+        <li>Settings &rarr; System &rarr; Developer options &rarr; <em>Select mock location
+            app</em> &rarr; choose the bridge app.</li>
+        <li>In the app pick a <em>Bluetooth LE</em> connection and choose
+            <code class="ble-name">gnss-haydamaka</code>. Do not pair it in Android's
+            Bluetooth settings first &mdash; BLE devices are connected from inside the app.</li>
+        <li>Turn its mock location on. Every other app now follows this device.</li>
+      </ol>
+      <h3>Over WiFi</h3>
+      <ol class="note">
+        <li>Put the phone on the same network as this device, or join its access point.</li>
+        <li>In the bridge app pick a <em>TCP/IP</em> connection and give it
+            <code class="ble-host">gnss-haydamaka.local</code> port <code>10110</code>. Use
+            the address shown above if the name does not resolve.</li>
+        <li>Set the mock location app as above.</li>
+      </ol>
+      <p class="note">
+        A PC needs no app: <code>gpsd -N -n tcp://<span class="ble-host">gnss-haydamaka.local</span>:10110</code>
+        feeds the whole desktop, and <code>ble-serial</code> does the same over BLE.
+      </p>
+    </section>
   </div>
 </main>
 
@@ -301,6 +368,19 @@ function renderWifi(w) {
   $('w-ip').textContent = w.sta_connected ? w.sta_ip : DASH;
   $('w-ap').textContent = w.ap ? `On · "${w.ap_ssid}", open · 192.168.4.1` : 'Off';
   $('w-host').textContent = w.hostname;
+
+  const ble = d.ble || {};
+  const bleSection = $('ble-pref').closest('section');
+  if (!ble.available) {
+    bleSection.hidden = true;
+  } else {
+    bleSection.hidden = false;
+    $('ble-pref').textContent = ble.preferred ? 'Bluetooth' : 'WiFi';
+    document.querySelectorAll('.ble-name').forEach(e => e.textContent = w.hostname.replace(/\.local$/, ''));
+    document.querySelectorAll('.ble-host').forEach(e => e.textContent = w.hostname);
+    $('ble-off').hidden = !ble.preferred;
+    if (ble.idle_s) $('ble-idle').textContent = `${ble.idle_s} s`;
+  }
   $('forget').hidden = !w.sta_saved;
   // Pre-fill the network name once; never overwrite what's being typed.
   const ssid = $('ssid');
@@ -367,6 +447,27 @@ $('forget').onclick = () => {
   if (!confirm('Forget this network? The device restarts and uses the built-in network, or its access point.')) return;
   post('/api/wifi/forget', null, 'Forgotten. Restarting…');
 };
+
+// This page is reachable only while WiFi has the radio, so Bluetooth is always
+// off while you are reading it. "Switch to Bluetooth" both remembers the choice
+// and acts on it now; the device comes back on its own.
+document.getElementById('ble-on').addEventListener('click', async () => {
+  if (!confirm('Switch to Bluetooth? WiFi stops and this page stops responding. '
+               + 'The device starts on Bluetooth from now on, and returns to WiFi '
+               + 'whenever nothing has been connected over Bluetooth for a while.')) return;
+  document.getElementById('ble-msg').textContent =
+      'Switching to Bluetooth. This page stops here; the device comes back to WiFi by itself.';
+  try {
+    await fetch('/api/ble', {method: 'POST', body: 'on'});
+  } catch (e) {
+    // Expected: the reply races the radio going away.
+  }
+});
+
+document.getElementById('ble-off').addEventListener('click', async () => {
+  document.getElementById('ble-msg').textContent = 'Starting on WiFi from now on.';
+  await fetch('/api/ble', {method: 'POST', body: 'off'});
+});
 
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its

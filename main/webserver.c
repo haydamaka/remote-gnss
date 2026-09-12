@@ -1,5 +1,7 @@
 #include "webserver.h"
 
+#include "nmea_ble.h"
+
 #include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
@@ -279,6 +281,19 @@ static esp_err_t status_get(httpd_req_t *req)
     json_int(&j, "rssi", w.sta_rssi);
     json_str(&j, "hostname", CONFIG_RGNSS_HOSTNAME ".local");
     json_int(&j, "fallback_s", CONFIG_RGNSS_STA_FALLBACK_S);
+    json_close(&j);
+
+    json_open(&j, "ble");
+#if CONFIG_RGNSS_BLE_ENABLED
+    nmea_ble_status_t b;
+    nmea_ble_status(&b);
+    json_bool(&j, "available", true);
+    json_bool(&j, "preferred", b.preferred);
+    json_bool(&j, "connected", b.connected);
+    json_int(&j, "idle_s", CONFIG_RGNSS_BLE_IDLE_S);
+#else
+    json_bool(&j, "available", false);
+#endif
     json_close(&j);
 
     const esp_app_desc_t *app = esp_app_get_description();
@@ -697,6 +712,34 @@ static esp_err_t ota_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+// Hands the one radio between WiFi and BLE. Switching to BLE stops WiFi, so
+// the reply goes out before the change is made -- it is the last thing this
+// client will hear. Nothing is saved: a restart comes back on WiFi, and so
+// does the device by itself once no BLE client has been connected for
+// CONFIG_RGNSS_BLE_IDLE_S.
+static esp_err_t ble_post(httpd_req_t *req)
+{
+#if CONFIG_RGNSS_BLE_ENABLED
+    char body[8] = "";
+    int len = req->content_len < sizeof(body) - 1 ? req->content_len : (int)sizeof(body) - 1;
+    if (len > 0 && httpd_req_recv(req, body, len) <= 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no body");
+    }
+    body[len > 0 ? len : 0] = '\0';
+    bool on = strcmp(body, "on") == 0;
+    if (!on && strcmp(body, "off") != 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body must be \"on\" or \"off\"");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, on ? "{\"ok\":true,\"wifi\":\"stopping\"}" : "{\"ok\":true}");
+    nmea_ble_set_enabled(on);
+    return ESP_OK;
+#else
+    return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "this firmware was built without BLE");
+#endif
+}
+
 static esp_err_t restart_post(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "restart requested");
@@ -765,6 +808,7 @@ esp_err_t webserver_start(void)
         {.uri = "/api/bearing/log", .method = HTTP_GET, .handler = bearing_log_get},
         {.uri = "/api/bearing", .method = HTTP_POST, .handler = bearing_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
+        {.uri = "/api/ble", .method = HTTP_POST, .handler = ble_post},
         {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
         {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = forget_post},

@@ -127,6 +127,16 @@ menu "Remote GNSS"
             default 4
             depends on RGNSS_TCP_ENABLED
 
+        config RGNSS_BLE_IDLE_S
+            int "Seconds without a BLE client before WiFi gets the radio back"
+            range 30 3600
+            default 120
+            depends on RGNSS_BLE_ENABLED
+            help
+                Switching to BLE stops WiFi, so something has to undo it if the
+                client never arrives or walks away. This is never saved either: a
+                restart always comes up on WiFi.
+
         config RGNSS_BLE_ENABLED
             bool "Serve NMEA over BLE (Nordic UART Service)"
             default y

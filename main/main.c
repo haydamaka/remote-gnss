@@ -37,7 +37,16 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_ERROR_CHECK(wifi_start());
+    // One radio, so one of the two. BLE only when it was asked for and the last
+    // BLE session actually had a client; otherwise WiFi, which is what makes the
+    // device configurable again.
+    bool ble_mode = false;
+#if CONFIG_RGNSS_BLE_ENABLED
+    ble_mode = nmea_ble_boot_mode();
+#endif
+    if (!ble_mode) {
+        ESP_ERROR_CHECK(wifi_start());
+    }
 
     // The web page is still useful with a sensor missing, so these aren't fatal.
     // They come first: the server must not serve a request before the modules it
@@ -56,15 +65,25 @@ void app_main(void)
     // Not fatal either: an abort here costs a USB cable, since the device is
     // updated over WiFi and a firmware that panics in app_main cannot be
     // replaced by the very server that would have replaced it.
-    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_service_start());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(webserver_start());
+    if (!ble_mode) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_service_start());
+        ESP_ERROR_CHECK_WITHOUT_ABORT(webserver_start());
+    }
 
-    // Wireless GNSS out to a PC or a phone. Neither is fatal: the web page and
-    // the receiver work without them.
+    // Wireless GNSS out to a PC or a phone, over whichever radio is running.
 #if CONFIG_RGNSS_TCP_ENABLED
-    ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_tcp_start());
+    if (!ble_mode) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_tcp_start());
+    }
 #endif
 #if CONFIG_RGNSS_BLE_ENABLED
-    ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_ble_start());
+    if (ble_mode) {
+        // If this fails there is no web page to say so, so fall back rather
+        // than sit there with neither radio: restart, which comes up on WiFi.
+        if (ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_ble_start()) != ESP_OK) {
+            ESP_LOGE(TAG, "BLE would not start; restarting into WiFi");
+            nmea_ble_set_enabled(false);
+        }
+    }
 #endif
 }

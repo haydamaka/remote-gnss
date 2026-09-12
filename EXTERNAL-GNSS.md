@@ -142,26 +142,40 @@ the web server's. The first version treated a stalled send as a dead client and
 disconnected it, which was the wrong response to a busy link; it now loses the
 batch and keeps the connection.
 
-**Coexistence: mostly solved, and the rest is a deliberate trade-off.** The C3
-has one radio, and NimBLE's defaults assume it has nothing else to do with it.
-Advertising every 30–60 ms and a connection event every 15 ms starved the
-station so thoroughly that it could not finish a WPA2 handshake with a −77 dBm
-access point. Advertising at 500 ms–1 s, a connection interval of 60–120 ms,
-WiFi power save off and the coexistence preference set to WiFi — all only when
-BLE is in use — let the station associate and the web page answer, and cost BLE
-nothing: 34 sentences/s with no errors, against 4.7 before.
+**Coexistence: abandoned deliberately, in favour of one radio at a time.** The
+C3 has a single radio, and NimBLE's defaults assume nothing else wants it.
+Advertising every 30-60 ms and a connection event every 15 ms starved the
+station so thoroughly that it could not finish a WPA2 handshake with a -77 dBm
+access point. Slowing both (500 ms-1 s and 60-120 ms), turning WiFi power save
+off and preferring WiFi in the coexistence policy got the station associating
+again and cost BLE nothing -- 34 sentences/s against 4.7 -- but an active BLE
+connection still knocked the station off the air, and association took 25 s and
+several retries.
 
-What remains: association takes about 25 s and several retries, and an active
-BLE connection still displaces the station. **That last part is accepted** — a
-client that wants BLE gives up WiFi for as long as it holds the link. What is
-not yet good enough is that the station should be dependable whenever BLE is
-*idle*, so the device stays configurable; today it comes back but flakily.
+So the device now does one or the other, and says so:
 
-The design that would settle it is to make BLE opt-in at run time rather than
-always advertising: a switch on the Outputs tab (phase 4), saved in NVS, so
-WiFi is untouched until someone deliberately chooses BLE. The signal itself is
-the other half — −77 dBm leaves coexistence no margin, and this is worth
-re-measuring next to the access point before tuning anything further.
+- **WiFi by default.** The BLE stack is not even initialised, which leaves its
+  ~40 KB of heap to WiFi. BLE is silent; nothing taxes the radio.
+- **Switching to BLE** (`POST /api/ble` with `on`, or the button on the WiFi/BLE
+  page) suspends the station and the access point fallback, then brings NimBLE
+  up with the whole radio.
+- **It always comes back.** With nothing connected over BLE for
+  `CONFIG_RGNSS_BLE_IDLE_S` (120 s), the radio goes back to WiFi. The
+  preference is saved, so the device starts on BLE again next time -- but it
+  can never strand itself, because the fallback does not depend on the setting.
+
+Two bugs found building this, both worth remembering. `enabled` was set *after*
+the stack started, so the host's sync callback asked "is BLE on?" while it was
+still false and never advertised. And the pump task called GAP functions before
+the host had synced, which returns `BLE_HS_EDISABLED` and -- when it raced
+`ble_svc_gap_init()` -- made NimBLE assert and reboot, turning a saved
+preference into a boot loop. There is now a `synced` gate, and a heap check that
+declines to start BLE rather than let NimBLE assert.
+
+**Signal is still the untested variable.** All of this was measured at -77 dBm,
+where coexistence has no margin at all. Next to the access point it may well
+hold both at once; the mode switch would then be a convenience rather than a
+necessity.
 
 ## 4. Client software
 
