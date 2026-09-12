@@ -232,7 +232,7 @@ static esp_err_t status_get(httpd_req_t *req)
     magnetometer_get(&m);
     wifi_get_status(&w);
 
-    char buf[1024];
+    char buf[1536];
     json_t j = {.buf = buf, .size = sizeof(buf)};
     json_open(&j, NULL);
 
@@ -249,6 +249,9 @@ static esp_err_t status_get(httpd_req_t *req)
     json_num(&j, "speed_kmh", g.speed_kmh, 1);
     json_num(&j, "course", g.course_deg, 1);
     json_str(&j, "utc", g.utc[0] ? g.utc : NULL);
+    json_int(&j, "spoof", g.spoof);
+    json_bool(&j, "implausible", g.implausible);
+    json_str(&j, "implausible_why", g.implausible_why[0] ? g.implausible_why : NULL);
     json_close(&j);
 
     float field[3];

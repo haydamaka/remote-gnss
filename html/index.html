@@ -102,6 +102,7 @@
     <section>
       <h2>Position</h2>
       <p class="status" id="gnss-status">Loading…</p>
+      <p class="status bad" id="gnss-warn" hidden></p>
       <table>
         <tr><th>Latitude</th><td id="lat">—</td></tr>
         <tr><th>Longitude</th><td id="lon">—</td></tr>
@@ -187,6 +188,8 @@
 const $ = id => document.getElementById(id);
 const DASH = '—';
 const QUALITY = {1: 'GPS fix', 2: 'DGPS fix', 4: 'RTK fixed', 5: 'RTK float', 6: 'Dead reckoning'};
+// What the receiver's own spoofing detector says (UBX-NAV-STATUS).
+const SPOOF = {2: 'the receiver reports spoofing', 3: 'the receiver reports several spoofing indications'};
 
 function selectTab(name) {
   for (const b of document.querySelectorAll('[role=tab]')) {
@@ -218,6 +221,12 @@ function renderGnss(g) {
   } else {
     status(el, `${QUALITY[g.quality] || 'Fix'} · ${g.sats} satellites`, 'ok');
   }
+  // Two independent detectors: the receiver's own, and whether the fix is possible at all.
+  const warnings = [SPOOF[g.spoof], g.implausible ? g.implausible_why : null].filter(Boolean);
+  $('gnss-warn').hidden = !warnings.length;
+  $('gnss-warn').textContent = warnings.length
+    ? `These satellite signals look faked: ${warnings.join('; ')}. Position and time are not to be trusted.`
+    : '';
   $('lat').textContent = coord(g.lat, 'N', 'S');
   $('lon').textContent = coord(g.lon, 'E', 'W');
   $('alt').textContent = num(g.alt, 1, ' m');

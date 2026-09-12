@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
+#include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
@@ -144,12 +145,30 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     }
 }
 
+// Network time, once there is a network. It is the one clock the GNSS
+// receiver cannot lie about, so gnss.c checks the receiver's time against it.
+static void start_time_sync(void)
+{
+    static bool started;
+    if (started) {
+        return;
+    }
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "no network time: %s", esp_err_to_name(err));
+        return;
+    }
+    started = true;
+}
+
 static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     ip_event_got_ip_t *e = data;
     ESP_LOGI(TAG, "connected to \"%s\", IP " IPSTR, sta_ssid, IP2STR(&e->ip_info.ip));
     sta_connected = true;
     xTimerStop(fallback_timer, 0);
+    start_time_sync();
     if (ap_active()) {
         ESP_LOGI(TAG, "access point down");
         esp_wifi_set_mode(WIFI_MODE_STA);

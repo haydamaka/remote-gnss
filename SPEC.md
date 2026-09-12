@@ -107,6 +107,21 @@ home network.
   Bluetooth Classic (no SPP): Bluetooth there means BLE with the Nordic UART
   Service.
 
+## Spoofing
+
+Satellite signals can be faked, so the page warns when the fix cannot be
+trusted. Two independent sources, because either alone can be fooled:
+
+- **The receiver's own verdict.** The device polls UBX-NAV-STATUS every 2 s and
+  reads `spoofDetState`. Polling changes nothing about the receiver's
+  configuration.
+- **Our own checks**, which do not depend on the receiver being honest:
+  - the receiver's clock against **network time** (SNTP over WiFi), which the
+    spoofer does not control — more than two minutes apart is a warning;
+  - the receiver's year against the firmware's build year, for when there is no
+    network;
+  - a jump in position faster than 900 km/h.
+
 ## Magnetometer calibration
 
 - Calibrate the hard- and soft-iron distortion iteratively: keep taking
