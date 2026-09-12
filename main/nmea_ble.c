@@ -3,7 +3,9 @@
 #include <string.h>
 
 #include "esp_check.h"
+#include "esp_coexist.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host/ble_hs.h"
@@ -19,10 +21,20 @@
 // client reassembles the lines.
 #define TX_SIZE 512
 
-// 15-30 ms. The default a phone picks can be ten times slower, which at 1 Hz
-// is fine but makes anything faster stutter.
-#define CONN_ITVL_MIN 12  // units of 1.25 ms
-#define CONN_ITVL_MAX 24
+// 60-120 ms, in units of 1.25 ms. Faster than this starves the WiFi station:
+// the chip has one radio, and a connection event every 15 ms left too little
+// airtime to hold a link to a distant access point. The controller sends
+// several notifications per event, so this still clears the filtered stream's
+// 1.9 KB/s with room to spare.
+#define CONN_ITVL_MIN 48
+#define CONN_ITVL_MAX 96
+
+// 500 ms to 1 s, in units of 0.625 ms. NimBLE's default advertises every
+// 30-60 ms, which on a one-radio chip is a constant tax on WiFi even when
+// nobody is listening -- enough on its own to stop the station associating.
+// Nothing here needs to be found in a hurry.
+#define ADV_ITVL_MIN 800
+#define ADV_ITVL_MAX 1600
 
 static const char *TAG = "nmea_ble";
 
@@ -114,6 +126,8 @@ static void advertise(void)
     struct ble_gap_adv_params params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = ADV_ITVL_MIN,
+        .itvl_max = ADV_ITVL_MAX,
     };
     rc = ble_gap_adv_start(own_addr_type, NULL, BLE_HS_FOREVER, &params, gap_event, NULL);
     if (rc != 0) {
@@ -288,6 +302,21 @@ static void pump_task(void *arg)
 esp_err_t nmea_ble_start(void)
 {
     ESP_RETURN_ON_ERROR(nmea_hub_init(), TAG, "hub");
+
+    // Both radios share one antenna, and the defaults are set for WiFi alone.
+    //
+    // WiFi's modem sleep parks the receiver between beacons; with BLE also
+    // asking for the radio, the station missed enough beacons to lose the
+    // access point altogether and fall back to its own. Turning power save off
+    // costs current the device has (it runs from USB) and is only done when
+    // BLE is actually in use.
+    //
+    // The coexistence preference decides who yields when both want the radio
+    // at once. WiFi wins: losing the station costs the web page, the OTA path
+    // and every TCP client, while BLE only slows down.
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_coex_preference_set(ESP_COEX_PREFER_WIFI));
+
     ESP_RETURN_ON_ERROR(nimble_port_init(), TAG, "nimble_port_init");
 
     ble_hs_cfg.sync_cb = on_sync;
