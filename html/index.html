@@ -52,10 +52,23 @@
   .secondary { border: 1px solid var(--line); background: none; color: var(--fg); }
   #msg:empty { display: none; }
   .cal { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; margin: 12px 0 8px; }
-  #sphere {
-    width: 240px; max-width: 100%; aspect-ratio: 1; height: auto; touch-action: none; cursor: grab;
+  .plot { display: flex; flex-direction: column; gap: 8px; }
+  #plot {
+    width: 240px; max-width: 100%; aspect-ratio: 1; height: auto; touch-action: none;
     background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
   }
+  #plot.sphere { cursor: grab; }
+  .segmented {
+    display: inline-flex; align-self: flex-start; overflow: hidden;
+    border: 1px solid var(--line); border-radius: 8px;
+  }
+  .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+  .segmented span {
+    display: block; padding: 5px 14px; color: var(--muted);
+    font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .segmented input:checked + span { background: var(--accent); color: #fff; }
+  .segmented label:focus-within span { outline: 2px solid var(--accent); outline-offset: -2px; }
   .cal-info { flex: 1; min-width: 180px; }
   .cal-info .buttons { margin-top: 8px; }
   .bar { height: 8px; margin: 6px 0; overflow: hidden; background: var(--line); border-radius: 4px; }
@@ -107,8 +120,14 @@
       </table>
       <p class="note" id="mag-note"></p>
       <div class="cal" id="cal" hidden>
-        <canvas id="sphere" width="240" height="240" role="img"
-                aria-label="Magnetometer calibration readings and the current field in 3D"></canvas>
+        <div class="plot">
+          <div class="segmented" role="radiogroup" aria-label="Plot view">
+            <label><input type="radio" name="plotview" value="compass" checked><span>Compass</span></label>
+            <label><input type="radio" name="plotview" value="sphere"><span>Sphere</span></label>
+          </div>
+          <canvas id="plot" width="240" height="240" role="img"
+                  aria-label="Compass, or the calibration readings in 3D"></canvas>
+        </div>
         <div class="cal-info">
           <p class="status" id="cal-status"></p>
           <div class="bar" id="cal-barbox" hidden><div id="cal-bar"></div></div>
@@ -296,8 +315,48 @@ $('forget').onclick = () => {
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
-const view = {cal: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0, fg: '',
+const view = {cal: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
+              fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
+const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+
+// Colours from the stylesheet, read once: the canvas can't use CSS variables.
+function colour(name) {
+  if (!view[name]) {
+    view[name] = name === 'fg' ? getComputedStyle(document.body).color
+               : name === 'bg' ? getComputedStyle($('plot')).backgroundColor
+                               : getComputedStyle($('cal-hint')).color;
+  }
+  return view[name];
+}
+
+// The firmware sends the calibration; applying it here keeps the plot in step
+// with the table, which shows the device's own corrected readings.
+function calibrated(m) {
+  const cal = view.cal && view.cal.cal;
+  if (!cal) return m;
+  const d = [m[0] - cal.offset[0], m[1] - cal.offset[1], m[2] - cal.offset[2]];
+  return [0, 1, 2].map(i => cal.matrix[3 * i] * d[0] + cal.matrix[3 * i + 1] * d[1] + cal.matrix[3 * i + 2] * d[2]);
+}
+
+// Shortest way round from the drawn heading to the measured one, in degrees.
+function headingError() {
+  if (view.headingTarget == null) return 0;
+  if (view.heading == null) {
+    view.heading = view.headingTarget;
+    return 0;
+  }
+  return ((view.headingTarget - view.heading + 540) % 360) - 180;
+}
+
+function setMode(mode) {
+  view.mode = mode;
+  for (const input of document.querySelectorAll('input[name=plotview]')) {
+    input.checked = input.value === mode;
+  }
+  $('plot').classList.toggle('sphere', mode === 'sphere');
+  animate();  // frame() draws once and stops if there's nothing to animate
+}
 
 const quantile = (sorted, q) => sorted[Math.floor(q * (sorted.length - 1))];
 
@@ -326,14 +385,102 @@ function drawArrow(g, from, to, colour) {
 }
 
 function draw() {
-  const cv = $('sphere'), c = view.cal;
+  const cv = $('plot'), c = view.cal;
   const size = cv.clientWidth, dpr = window.devicePixelRatio || 1;
   if (!size || !c) return;
   if (cv.width !== Math.round(size * dpr)) cv.width = cv.height = Math.round(size * dpr);
   const g = cv.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, size, size);
+  if (view.mode === 'compass') {
+    drawCompass(g, size, c);
+  } else {
+    drawSphere(g, size, c);
+  }
+}
 
+// A compass card: the ring turns so that N sits at magnetic north, while the
+// index mark at the top stays with the module's +X axis.
+function drawCompass(g, size, c) {
+  const cx = size / 2, cy = size / 2, r = size / 2 - 16;
+  const fg = colour('fg'), muted = colour('muted');
+
+  g.lineWidth = 1.5;
+  g.strokeStyle = muted;
+  g.beginPath();
+  g.arc(cx, cy, r, 0, 2 * Math.PI);
+  g.stroke();
+
+  g.fillStyle = fg;  // index mark: where the module points
+  g.beginPath();
+  g.moveTo(cx, cy - r - 1);
+  g.lineTo(cx - 5, cy - r - 10);
+  g.lineTo(cx + 5, cy - r - 10);
+  g.closePath();
+  g.fill();
+
+  g.textAlign = 'center';
+  if (view.heading == null) {
+    g.fillStyle = muted;
+    g.textBaseline = 'middle';
+    g.font = '13px system-ui, sans-serif';
+    g.fillText('waiting for readings', cx, cy);
+    return;
+  }
+
+  // The card turns, but its letters stay upright: rotated ones are unreadable this small.
+  for (let a = 0; a < 360; a += 15) {
+    const major = a % 45 === 0, t = (a - view.heading) * Math.PI / 180;
+    const x = Math.sin(t), y = -Math.cos(t), len = major ? 9 : 5;
+    g.strokeStyle = major ? fg : muted;
+    g.lineWidth = major ? 1.5 : 1;
+    g.beginPath();
+    g.moveTo(cx + x * r, cy + y * r);
+    g.lineTo(cx + x * (r - len), cy + y * (r - len));
+    g.stroke();
+  }
+  g.textBaseline = 'middle';
+  CARDINALS.forEach((name, i) => {
+    const t = (i * 45 - view.heading) * Math.PI / 180, rr = r - 21;
+    g.fillStyle = name === 'N' ? '#d33' : fg;
+    g.font = (name.length === 1 ? 'bold 13px ' : '11px ') + 'system-ui, sans-serif';
+    g.fillText(name, cx + Math.sin(t) * rr, cy - Math.cos(t) * rr);
+  });
+
+  // Needle: red to magnetic north, grey opposite, clear of the hub.
+  const rad = view.heading * Math.PI / 180;
+  const hx = -Math.sin(rad), hy = -Math.cos(rad), hub = 34, tip = r - 30;
+  g.lineWidth = 3;
+  g.strokeStyle = '#d33';
+  g.beginPath();
+  g.moveTo(cx + hx * hub, cy + hy * hub);
+  g.lineTo(cx + hx * tip, cy + hy * tip);
+  g.stroke();
+  g.strokeStyle = muted;
+  g.beginPath();
+  g.moveTo(cx - hx * hub, cy - hy * hub);
+  g.lineTo(cx - hx * tip, cy - hy * tip);
+  g.stroke();
+
+  g.fillStyle = colour('bg');  // hub, so the readout never sits on the needle
+  g.beginPath();
+  g.arc(cx, cy, hub - 2, 0, 2 * Math.PI);
+  g.fill();
+  g.textBaseline = 'alphabetic';
+  g.fillStyle = fg;
+  g.font = 'bold 20px system-ui, sans-serif';
+  g.fillText(`${Math.round(view.heading) % 360}°`, cx, cy + 2);
+  g.font = '11px system-ui, sans-serif';
+  g.fillStyle = muted;
+  g.fillText(CARDINALS[Math.round(view.heading / 45) % 8], cx, cy + 18);
+  if (!c.cal) {
+    g.fillStyle = '#a15c00';
+    g.fillText('uncalibrated', cx, cy + r + 12);
+  }
+}
+
+// The calibration readings as a point cloud, with the current field as an arrow.
+function drawSphere(g, size, c) {
   const running = c.state === 'running';
   const centre = running || !c.cal ? c.centre : c.cal.offset;
   const rel = p => [p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]];
@@ -369,7 +516,7 @@ function draw() {
   if (view.live) {
     const d = rel(view.live), s = project(d);
     if (running) {  // where the module points now, among the dots being collected
-      g.strokeStyle = view.fg || (view.fg = getComputedStyle(document.body).color);
+      g.strokeStyle = colour('fg');
       g.lineWidth = 1.5;
       g.beginPath(); g.arc(s[0], s[1], 5, 0, 2 * Math.PI); g.stroke();
     } else {
@@ -379,14 +526,19 @@ function draw() {
 }
 
 function frame() {
-  const running = view.cal && view.cal.state === 'running';
+  const spinning = view.mode === 'sphere' && view.cal && view.cal.state === 'running';
+  const settling = view.mode === 'compass' && Math.abs(headingError()) > 0.2;
   // A hidden tab or panel leaves the canvas zero-wide: stop until it's shown again.
-  if ((!running && !view.drag) || document.hidden || !$('sphere').clientWidth) {
+  if ((!spinning && !settling && !view.drag) || document.hidden || !$('plot').clientWidth) {
     view.animating = false;
     draw();
     return;
   }
-  if (!view.drag) view.yaw += 0.005;
+  if (view.mode === 'compass') {
+    view.heading = (view.heading + headingError() * 0.25 + 360) % 360;  // ease, don't jump
+  } else if (!view.drag) {
+    view.yaw += 0.005;
+  }
   draw();
   requestAnimationFrame(frame);
 }
@@ -402,6 +554,9 @@ function renderCal() {
   const c = view.cal, running = c.state === 'running', saved = c.points.length > 0;
   const pct = Math.round(c.progress * 100);
   if (running) view.calError = '';  // the last request clearly went through
+  // Show the sphere while calibrating; going back is the user's choice.
+  if (running && view.lastState !== 'running') setMode('sphere');
+  view.lastState = c.state;
   $('cal-start').hidden = running;
   $('cal-fresh').hidden = running || !saved;
   $('cal-stop').hidden = !running;
@@ -477,7 +632,9 @@ async function pollLive() {
       if (!view.skip && j.seq >= view.since && j.samples.length) {
         const [, , x, y, z] = j.samples[j.samples.length - 1];
         view.live = [x, y, z].map(v => v * j.ut_per_count);
-        if (!view.animating) draw();
+        const b = calibrated(view.live);
+        view.headingTarget = (Math.atan2(b[1], b[0]) * 180 / Math.PI + 360) % 360;
+        if (view.mode === 'compass') animate(); else if (!view.animating) draw();
       }
       view.since = j.seq;
       view.skip = false;
@@ -507,8 +664,13 @@ $('cal-fresh').onclick = () => {
 };
 $('cal-stop').onclick = () => calPost('/api/cal/stop');
 
-const sphere = $('sphere');
+for (const input of document.querySelectorAll('input[name=plotview]')) {
+  input.onchange = () => setMode(input.value);
+}
+
+const sphere = $('plot');
 sphere.onpointerdown = e => {
+  if (view.mode !== 'sphere') return;  // only the point cloud turns
   view.drag = [e.clientX, e.clientY, view.yaw, view.pitch];
   sphere.setPointerCapture(e.pointerId);
   animate();
