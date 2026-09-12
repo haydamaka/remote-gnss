@@ -56,6 +56,7 @@ typedef struct {
     uint8_t missing;            // bit k: cap k of +X −X +Y −Y +Z −Z not reached
     float centre[3];            // current centre estimate
     uint16_t points;            // readings in the buffer
+    uint32_t refused;           // readings this session turned away as disagreeing
     mag_cal_params_t params;    // the calibration in use
     bool can_accept;            // the fit is usable now, though below the quality bar
     bool have_fit;              // whether fit holds a result yet
@@ -65,7 +66,6 @@ typedef struct {
 
 // Loads the saved calibration and starts the calibration task. Call after
 // magnetometer_start().
-    uint32_t refused;           // readings this session turned away as disagreeing
 esp_err_t mag_cal_init(void);
 
 // Starts a session that continues from the saved readings, or with fresh set,
@@ -74,6 +74,11 @@ esp_err_t mag_cal_begin(bool fresh);
 
 // Interrupts a running session.
 void mag_cal_stop(void);
+
+// Replaces the buffered readings with a set loaded from elsewhere (a file the
+// user saved earlier). The session state is cleared; the readings are kept and
+// re-binned, so a following session continues from them.
+esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n);
 
 // Saves the current fit even though it hasn't met the quality bar, as long as
 // it is usable (see ROUGH_* in the source). ESP_ERR_INVALID_STATE if it isn't.
@@ -85,11 +90,6 @@ void mag_cal_get_status(mag_cal_status_t *out);
 size_t mag_cal_get_points(float (*out)[3], size_t max);
 
 // Bytes of stack the calibration task has never used: the fit is the heaviest
-// Replaces the buffered readings with a set loaded from elsewhere (a file the
-// user saved earlier). The session state is cleared; the readings are kept and
-// re-binned, so a following session continues from them.
-esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n);
-
 // thing it does, so this is what to watch when the fit grows.
 size_t mag_cal_stack_free(void);
 

@@ -54,10 +54,10 @@ _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer re
 #define STABLE_OFFSET_UT 0.5f
 #define STABLE_MATRIX 0.01f
 #define STABLE_RADIUS 0.005f
-
-static const char *TAG = "mag_cal";
 #define TIDY_MAX_SHIFT_UT 1.0f  // a tidy-up that moves the centre more than this is refused
 #define NEWCOMER_BIAS 1.5f      // how much worse than the stored worst a new reading must be to be refused
+
+static const char *TAG = "mag_cal";
 
 typedef struct {
     float v[3];      // µT
@@ -94,16 +94,17 @@ static int64_t last_save;
 static int64_t last_fit;
 static uint32_t session_id;
 static int session_new;
+static uint32_t session_refused;  // readings turned away for disagreeing with their own direction
 static mag_cal_params_t params;
 static mag_cal_params_t params_before_save;
 static mag_fit_t fit;
 static bool have_fit;
-static uint32_t session_refused;  // readings turned away for disagreeing with their own direction
 static int stable_count;
 static uint32_t fit_ms;
 static bool points_dirty;
 static bool params_dirty;
 static bool started;
+static bool fit_once;  // fit even without a session: readings were just loaded
 static TaskHandle_t task;
 
 static float dist(const float a[3], const float b[3])
@@ -111,7 +112,6 @@ static float dist(const float a[3], const float b[3])
     float d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
     return sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
 }
-static bool fit_once;  // fit even without a session: readings were just loaded
 
 // Direction of v about c; false if v sits on it.
 static bool direction_from(const float c[3], const float v[3], float u[3])
@@ -590,6 +590,7 @@ static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t
 static void run_fit(void)
 {
     static float snapshot[MAG_CAL_MAX_POINTS][3];
+    static bool keep[MAG_CAL_MAX_POINTS];
     mag_fit_t start;
     mag_fit_t result;
     bool have_start;
@@ -614,40 +615,15 @@ static void run_fit(void)
 
     xSemaphoreTake(lock, portMAX_DELAY);
     if (id != session_id) {
-// A mathematical cleanup: refit on just the readings the fit kept, so strays
-// stop pulling on the answer. Taken only when it keeps most of the readings,
-// really improves, and barely moves the centre — otherwise it would just be
-// inventing a nicer-looking number.
-static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t *fit_io)
-{
-    static float kept[MAG_CAL_MAX_POINTS][3];
-    size_t k = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (keep[i]) {
-            memcpy(kept[k++], pts[i], sizeof(kept[0]));
-        }
-    }
-    if (k < MIN_FIT_POINTS || k * 10 < n * 7) {
-        return false;
-    }
-    mag_fit_t tidy;
-    if (!mag_fit(kept, k, 0.0f, fit_io, &tidy, NULL) || tidy.rms > fit_io->rms * 0.9f ||
-        dist(tidy.offset, fit_io->offset) > TIDY_MAX_SHIFT_UT) {
-        return false;
-    }
-    *fit_io = tidy;
-    return true;
-}
-
         xSemaphoreGive(lock);  // the session was restarted while we fitted
         return;
     }
-    static bool keep[MAG_CAL_MAX_POINTS];
     fit_ms = took;
     if (ok) {
         stable_count = have_fit && settled(&result, &fit) ? stable_count + 1 : 0;
         fit = result;
         have_fit = true;
+        fit_tidied = tidied;
         if (mag_fit_plausible_for_binning(&result)) {
             recentre_to(result.offset);
         }
@@ -762,6 +738,7 @@ esp_err_t mag_cal_begin(bool fresh)
     stable_count = 0;
     fit_ms = 0;
     session_new = 0;
+    session_refused = 0;
     session_id++;
     session_start = last_save = esp_timer_get_time();
     last_fit = 0;
@@ -807,6 +784,29 @@ esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
         points[npoints].v[1] = pts[i][1];
         points[npoints].v[2] = pts[i][2];
         points[npoints].order = i;
+        points[npoints].cell = 0;
+        npoints++;
+    }
+    arrivals = npoints;
+    // Bin them about the best centre we have: a poor centre scatters readings
+    // into the wrong cells, where the per-cell cap then throws them away.
+    if (params.valid) {
+        memcpy(centre, params.offset, sizeof(centre));
+    } else {
+        range_centre(centre);
+    }
+    rebin();
+    fit_once = true;  // let the task fit them and re-bin about the result
+    update_progress();
+    points_dirty = true;
+    snprintf(message_buf, sizeof(message_buf),
+             "Loaded %u readings from a file, %.0f %% of directions covered. Continue calibration to fit them.",
+             npoints, coverage * 100);
+    ESP_LOGI(TAG, "loaded %u readings from a file", npoints);
+    xSemaphoreGive(lock);
+    return ESP_OK;
+}
+
 esp_err_t mag_cal_accept(void)
 {
     esp_err_t err = ESP_ERR_INVALID_STATE;
@@ -847,29 +847,6 @@ size_t mag_cal_get_points(float (*out)[3], size_t max)
     xSemaphoreTake(lock, portMAX_DELAY);
     size_t n = npoints < max ? npoints : max;
     for (size_t i = 0; i < n; i++) {
-        points[npoints].cell = 0;
-        npoints++;
-    }
-    arrivals = npoints;
-    // Bin them about the best centre we have: a poor centre scatters readings
-    // into the wrong cells, where the per-cell cap then throws them away.
-    if (params.valid) {
-        memcpy(centre, params.offset, sizeof(centre));
-    } else {
-        range_centre(centre);
-    }
-    rebin();
-    fit_once = true;  // let the task fit them and re-bin about the result
-    update_progress();
-    points_dirty = true;
-    snprintf(message_buf, sizeof(message_buf),
-             "Loaded %u readings from a file, %.0f %% of directions covered. Continue calibration to fit them.",
-             npoints, coverage * 100);
-    ESP_LOGI(TAG, "loaded %u readings from a file", npoints);
-    xSemaphoreGive(lock);
-    return ESP_OK;
-}
-
         memcpy(out[i], points[i].v, sizeof(out[i]));
     }
     xSemaphoreGive(lock);
@@ -893,7 +870,6 @@ bool mag_cal_apply(const float m[3], float b[3])
     float d[3] = {m[0] - p.offset[0], m[1] - p.offset[1], m[2] - p.offset[2]};
     for (int i = 0; i < 3; i++) {
         b[i] = p.matrix[3 * i] * d[0] + p.matrix[3 * i + 1] * d[1] + p.matrix[3 * i + 2] * d[2];
-        .refused = session_refused,
     }
     return true;
 }

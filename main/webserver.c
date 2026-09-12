@@ -617,10 +617,10 @@ esp_err_t webserver_start(void)
         {.uri = "/api/cal/start", .method = HTTP_POST, .handler = cal_start_post},
         {.uri = "/api/cal/stop", .method = HTTP_POST, .handler = cal_stop_post},
         {.uri = "/api/cal/accept", .method = HTTP_POST, .handler = cal_accept_post},
+        {.uri = "/api/cal/points", .method = HTTP_POST, .handler = cal_points_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
         {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
-        {.uri = "/api/cal/points", .method = HTTP_POST, .handler = cal_points_post},
         {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = forget_post},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
