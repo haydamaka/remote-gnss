@@ -19,7 +19,7 @@
 #define TAG "bearing"
 #define NVS_NAMESPACE "bearing"
 #define NVS_KEY_STATE "state"
-#define NVS_VERSION 1
+#define NVS_VERSION 2
 
 #define TICK_MS 100          // the receiver and the magnetometer both run at 10 Hz
 #define TRACE_EVERY_S 60.0f  // one trace record per minute of qualifying driving
@@ -34,7 +34,9 @@
 typedef struct {
     uint32_t version;
     bool learning, applying;
-    float total_s;  // qualifying driving, summed across restarts
+    float total_s;  // qualifying driving, summed across restarts: the readout
+    float run_s;    // ...and the clock the estimator sees, which also runs
+                    // while stopped, so a window cannot span a traffic light
     bearing_cal_t cal;
     uint32_t trace_first, trace_n;
     bearing_trace_t trace[BEARING_TRACE_MAX];
@@ -116,7 +118,7 @@ static esp_err_t save_st(void)
     if (err != ESP_OK) {
         return err;
     }
-    uint16_t keep = st.cal.n;
+    int keep = st.cal.n;
     st.cal.n = 0;  // an unfinished window is not worth keeping
     err = nvs_set_blob(nvs, NVS_KEY_STATE, &st, sizeof(st));
     st.cal.n = keep;
@@ -166,6 +168,7 @@ static void load(void)
         st.trace_n = 0;
         st.trace_first = 0;
     }
+    bearing_cal_result(&st.cal, &latest);  // or it reads as nothing until the next drive
     ESP_LOGI(TAG, "%.2f h of driving learned so far, %s%s", st.total_s / 3600.0,
              st.learning ? "collecting" : "not collecting",
              st.applying ? ", correcting the heading" : ", shadow only");
@@ -175,31 +178,33 @@ static void load(void)
 // ---- collecting ----
 
 // Declination and the field strength to expect here, refreshed now and then.
+static float wmm_at_s = -1e9f;
+static bool wmm_have;
+static wmm_field_t wmm_f;
+
 static bool local_field(const gnss_data_t *g, float *decl, float *horizontal)
 {
-    static float at_s = -1e9f;
-    static bool have;
-    static wmm_field_t f;
-
-    if (st.total_s - at_s > WMM_EVERY_S || !have) {
+    // The "or the clock went backwards" case is a reset, which puts run_s back
+    // to zero and would otherwise reuse the old field for hours of driving.
+    if (st.run_s - wmm_at_s > WMM_EVERY_S || st.run_s < wmm_at_s || !wmm_have) {
         int y, mo, d;
         if (g->fix && sscanf(g->utc, "%d-%d-%d", &y, &mo, &d) == 3) {
             float year = wmm_decimal_year(y, mo, d);
             if (year > WMM_VALID_UNTIL) {
                 year = WMM_VALID_UNTIL - 0.01f;  // stale beats none for this
             }
-            have = wmm_field(g->latitude, g->longitude, g->altitude_m, year, &f);
-            at_s = st.total_s;
+            wmm_have = wmm_field(g->latitude, g->longitude, g->altitude_m, year, &wmm_f);
+            wmm_at_s = st.run_s;
         }
     }
-    if (!have) {
+    if (!wmm_have) {
         return false;
     }
-    *decl = f.declination;
-    *horizontal = f.horizontal;
+    *decl = wmm_f.declination;
+    *horizontal = wmm_f.horizontal;
     // The once-round amplitude is reported in microtesla, which needs the field
     // here rather than the default the estimator was built with.
-    st.cal.cfg.h_field_ut = f.horizontal;
+    st.cal.cfg.h_field_ut = wmm_f.horizontal;
     return true;
 }
 
@@ -272,7 +277,7 @@ static void tick(void)
     }
 
     bearing_sample_t s = {
-        .t = st.total_s,
+        .t = st.run_s,
         .course_deg = g.course_deg,
         .speed_mps = isfinite(g.speed_kmh) ? g.speed_kmh / 3.6f : 0.0f,
         .heading_deg = heading,
@@ -297,24 +302,30 @@ static void bearing_task(void *arg)
         // The clock only runs while the device is doing something that could
         // qualify, so "two hours of driving" means two hours of driving.
         bool moving = g.fix && isfinite(g.speed_kmh) && g.speed_kmh / 3.6f >= 3.0f;
-        if (!moving) {
-            continue;
-        }
+
         xSemaphoreTake(st_lock, portMAX_DELAY);
-        st.total_s += TICK_MS / 1000.0f;
+        // run_s always advances; total_s only while the device is doing
+        // something that could qualify, so "two hours of driving" means two
+        // hours of driving. The estimator is given run_s: it has its own speed
+        // gate, and it needs to see a stop as the gap it is, or a run either
+        // side of a traffic light becomes one straight eight seconds.
+        st.run_s += TICK_MS / 1000.0f;
+        if (moving) {
+            st.total_s += TICK_MS / 1000.0f;
+        }
 
         if (st.learning) {
             tick();
             dirty = true;
         }
 
-        if (st.total_s - last_trace_s >= TRACE_EVERY_S) {
+        if (moving && st.total_s - last_trace_s >= TRACE_EVERY_S) {
             last_trace_s = st.total_s;
             bearing_trace_t rec;
             bearing_cal_trace(&st.cal, (uint32_t)st.total_s, &rec);
             trace_push(&rec);
         }
-        if (dirty && st.total_s - last_save_s >= SAVE_EVERY_S) {
+        if (dirty && moving && st.total_s - last_save_s >= SAVE_EVERY_S) {
             last_save_s = st.total_s;
             esp_err_t err = save_st();
             if (err != ESP_OK) {
@@ -389,6 +400,8 @@ esp_err_t bearing_reset(void)
     st.applying = was_applying;
     bearing_cal_init(&st.cal, &cfg);
     last_trace_s = last_save_s = 0.0f;
+    wmm_at_s = -1e9f;  // the clock went back to zero; do not reuse a stale field
+    wmm_have = false;
     fixes_seen = fixes_usable = 0;
     memset(blocked, 0, sizeof(blocked));
     esp_err_t err = save_st();

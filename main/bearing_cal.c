@@ -158,8 +158,17 @@ static float sectors_mean(const float *sx, const float *sy, const float *sw, int
 static float circular_median(const bearing_hold_t *a, int n)
 {
     // n is at most BEARING_HOLD, so an insertion sort is the whole of it. The
-    // values are angles, so sort them relative to one of their own.
-    float ref = a[0].delta;
+    // values are angles, so sort them relative to a reference - and that has to
+    // be the vector mean, not a[0]. With a[0] opposite the cluster (one
+    // reversing window among seven good ones, which is precisely what this
+    // function exists to survive) the wrapped values land at both ends of the
+    // sorted list and the median falls between them, 90 degrees from everything.
+    float rx = 0.0f, ry = 0.0f;
+    for (int i = 0; i < n; i++) {
+        rx += cosf(a[i].delta * DEG);
+        ry += sinf(a[i].delta * DEG);
+    }
+    float ref = (rx == 0.0f && ry == 0.0f) ? a[0].delta : wrap360(atan2f(ry, rx) / DEG);
     float rel[BEARING_HOLD];
     for (int i = 0; i < n; i++) {
         rel[i] = wrap180(a[i].delta - ref);
@@ -236,8 +245,11 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
         st->t0 = st->t_last = s->t;
         st->c_prev = s->course_deg;
         st->h_prev = s->heading_deg;
-        st->course_unwrapped = s->course_deg;
-        st->head_unwrapped = s->heading_deg;
+        // Relative to the window's first reading: only the slope and the
+        // scatter are used, and single-precision sums of absolute headings
+        // near 300 degrees lose the fraction of a degree being measured.
+        st->course_unwrapped = 0.0f;
+        st->head_unwrapped = 0.0f;
         st->d_first = wrap360(s->course_deg - s->decl_deg - s->heading_deg);
         st->speed_min = st->speed_max = s->speed_mps;
     } else {
@@ -246,10 +258,15 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
         // second by default, where an M10 does it ten times, and a fixed
         // one-second rule would throw away every window from the former.
         float dt = s->t - st->t_last;
-        st->interval = st->interval > 0.0f ? 0.95f * st->interval + 0.05f * dt : dt;
-        if (dt > 2.5f * st->interval && dt > 0.3f) {
+        bool gap = st->interval > 0.0f ? (dt > 2.5f * st->interval && dt > 0.3f) : (dt > 1.5f);
+        if (gap) {
             st->window_dead = true;
             st->window_why = BEARING_GAP;
+        } else {
+            // Only intervals that were not gaps teach the estimate, or a hole
+            // raises the very threshold meant to catch the next one.
+            st->interval = st->interval > 0.0f ? 0.95f * st->interval + 0.05f * dt : dt;
+            st->interval = st->interval < 0.05f ? 0.05f : st->interval > 2.0f ? 2.0f : st->interval;
         }
         st->course_unwrapped += wrap180(s->course_deg - st->c_prev);
         st->head_unwrapped += wrap180(s->heading_deg - st->h_prev);
@@ -674,7 +691,8 @@ void bearing_cal_trace(const bearing_cal_t *st, uint32_t t_s, bearing_trace_t *o
     bearing_cal_result(st, &r);
     memset(out, 0, sizeof(*out));
     out->t_s = t_s;
-    out->offset_cdeg = (int16_t)lrintf(r.offset_deg * 100.0f);
+    // Signed, so it fits: 0..360 in centidegrees would overflow past 327.68.
+    out->offset_cdeg = (int16_t)lrintf(wrap180(r.offset_deg) * 100.0f);
     out->resid_rms_cdeg = (int16_t)lrintf(fminf(r.quality.resid_rms_deg, 327.0f) * 100.0f);
     out->split_cdeg = (int16_t)lrintf(fminf(r.quality.split_deg, 327.0f) * 100.0f);
     out->sectors = (uint8_t)r.sectors;

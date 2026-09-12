@@ -430,8 +430,9 @@ agree with *each other* rather than with the estimate, the estimate is the thing
 that is wrong: everything is thrown away and rebuilt from them. A 90° remount is
 followed within a few trips.
 
-**Cost.** 744 bytes of state, of which the 144 bytes of sector accumulators are
-all that needs saving to NVS. 7.4 kB of code compiled for the ESP32-C3. 0.06 µs
+**Cost.** 1096 bytes of state, of which the 144 bytes of sector accumulators are
+the part that matters; the firmware saves the lot, plus a 120-record trace, as
+one 3 kB NVS blob. 7.4 kB of code compiled for the ESP32-C3. 0.06 µs
 per fix and 1.1 µs per fit on the host — so a few microseconds per fix and well
 under a millisecond per window in software floating point, against one window
 every eight seconds.

@@ -20,7 +20,8 @@
 #define UART_RX_BUF_SIZE 2048
 #define NO_DATA_WARN_US (5 * 1000 * 1000)
 #define STATUS_POLL_US (2 * 1000 * 1000)
-#define BAUD_TRY_US (3 * 1000 * 1000)  // long enough for a sentence at any of these rates
+#define BAUD_TRY_US (3 * 1000 * 1000)   // long enough for a sentence at any of these rates
+#define RELOCK_US (60 * 1000 * 1000)    // silence this long means the rate was wrong
 #define IMPLAUSIBLE_SPEED_KMH 900.0f  // faster than an airliner: the fix jumped
 #define IMPLAUSIBLE_MIN_KM 0.5        // below this, a "jump" is just multipath
 #define STALE_US (10 * 1000 * 1000)   // a warning older than this says nothing
@@ -71,9 +72,7 @@ static void handle_gga(const char *line)
         }
     }
 
-    int64_t now = esp_timer_get_time();
     taskENTER_CRITICAL(&lock);
-    data.epoch_us = now;  // one GGA per navigation solution, whatever the rate
     data.fix = fix;
     data.fix_quality = f.fix_quality;
     data.satellites = f.satellites_tracked;
@@ -123,7 +122,12 @@ static void handle_rmc(const char *line)
         utc_epoch_us = esp_timer_get_time();
     }
 
+    int64_t now = esp_timer_get_time();
     taskENTER_CRITICAL(&lock);
+    // One per navigation solution, stamped here rather than on the GGA: the
+    // receiver sends GGA first, so a reader woken between the two would pair a
+    // fresh position with the previous solution's course.
+    data.epoch_us = now;
     data.speed_kmh = speed_kmh;
     data.course_deg = course;
     memcpy(data.utc, utc, sizeof(utc));
@@ -245,11 +249,20 @@ static void check_plausible(double lat, double lon, const char *utc)
     taskEXIT_CRITICAL(&lock);
 }
 
+// Sentences that carried a checksum and passed it. The baud hunt locks on this
+// rather than on data.sentences, because minmea's lax mode accepts a sentence
+// with no checksum at all - so seven plausible bytes of framing garbage at the
+// wrong rate would otherwise end the search there for good.
+static uint32_t checksummed;
+
 static void handle_sentence(const char *line)
 {
     enum minmea_sentence_id id = minmea_sentence_id(line, false);
     if (id == MINMEA_INVALID) {
         return;
+    }
+    if (minmea_check(line, true)) {
+        checksummed++;
     }
     int64_t now = esp_timer_get_time();
     taskENTER_CRITICAL(&lock);
@@ -278,12 +291,13 @@ static void reader_task(void *arg)
 
     size_t baud_idx = 0;
     int64_t baud_since = esp_timer_get_time();
+    int64_t last_good = baud_since;
     bool locked = false;
 
     for (;;) {
         // Hunt for the rate until something checksums, then stay there.
         if (!locked) {
-            if (data.sentences > 0) {
+            if (checksummed > 0) {
                 locked = true;
                 ESP_LOGI(TAG, "receiver found at %d baud", data.baud);
             } else if (esp_timer_get_time() - baud_since > BAUD_TRY_US) {
@@ -308,11 +322,21 @@ static void reader_task(void *arg)
             uart_write_bytes(GNSS_UART, POLL_NAV_STATUS, sizeof(POLL_NAV_STATUS));
         }
         int n = uart_read_bytes(GNSS_UART, buf, sizeof(buf), pdMS_TO_TICKS(100));
+        // Nothing has parsed for a long time: the rate we settled on may have
+        // been wrong, or the receiver was swapped. Hunt again rather than sit
+        // silent for ever.
+        if (locked && esp_timer_get_time() - last_good > RELOCK_US) {
+            ESP_LOGW(TAG, "nothing has parsed for %d s; hunting for the rate again",
+                     (int)(RELOCK_US / 1000000));
+            locked = false;
+            checksummed = 0;
+            baud_since = esp_timer_get_time();
+        }
         if (n <= 0) {
             if (!warned && esp_timer_get_time() - last_rx > NO_DATA_WARN_US) {
                 // The UART driver pulls RX up, so a low line is being held down by something.
                 ESP_LOGW(TAG, "no data on GPIO%d at %d baud; the line is %s", CONFIG_RGNSS_GNSS_RX_GPIO,
-                         CONFIG_RGNSS_GNSS_BAUD,
+                         data.baud,
                          gpio_get_level(CONFIG_RGNSS_GNSS_RX_GPIO) ? "high (receiver silent or not connected)"
                                                                     : "held low (receiver unpowered?)");
                 warned = true;
@@ -321,6 +345,9 @@ static void reader_task(void *arg)
         }
         last_rx = esp_timer_get_time();
         warned = false;
+        if (checksummed) {
+            last_good = last_rx;
+        }
 
         for (int i = 0; i < n; i++) {
             char c = (char)buf[i];

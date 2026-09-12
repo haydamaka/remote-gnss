@@ -440,6 +440,38 @@ static void test_one_hertz_receiver(void)
     HZ = 10;
 }
 
+// A reversing stretch among the first windows used to poison the seed: the
+// circular median took its reference from an arbitrary member, so one sample
+// opposite the cluster put the median 90 degrees from everything and
+// release_hold() then discarded every window it had.
+static void test_reversing_in_the_seed(void)
+{
+    printf("\nReversing out of the drive, before anything has been learned\n");
+    world_t w = {.mount_deg = 215.0f, .h_field_ut = 19.4f, .decl_deg = 8.6f,
+                 .course_sigma_v = 0.05f, .heading_sigma = 0.5f};
+    bearing_cfg_t cfg;
+    bearing_cal_defaults(&cfg);
+    bearing_cal_t cal;
+    bearing_cal_init(&cal, &cfg);
+    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+
+    // One window's worth of backing out of a drive - the module points
+    // forwards while travel goes the other way - then an ordinary trip. The
+    // seed is then one sample opposite seven good ones, which is the case the
+    // circular median has to survive.
+    tr.module_yaw = 180.0f;
+    drive_straight(&tr, 30.0f, 5.0f, 11.0f);
+    tr.module_yaw = 0.0f;
+    town_trip(&tr, 12, 40.0f, 14.0f);
+    town_trip(&tr, 12, 40.0f, 14.0f);
+
+    bearing_result_t r;
+    bearing_cal_result(&cal, &r);
+    report_rejects(&r);
+    check_true("still applies it", r.have, true);
+    check("offset, not dragged by the reversing", r.offset_deg, w.mount_deg, 2.0f);
+}
+
 int main(void)
 {
     test_mounting_offset();
@@ -451,6 +483,7 @@ int main(void)
     test_quality_when_steady();
     test_quality_catches_drift();
     test_one_hertz_receiver();
+    test_reversing_in_the_seed();
     printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "all passed", failures,
            failures == 1 ? "" : "s");
     return failures ? 1 : 0;
