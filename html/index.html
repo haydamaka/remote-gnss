@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>remote-gnss</title>
+<title>Haydamaka-GNSS</title>
 <style>
   :root {
     --bg: #f4f4f1; --card: #fff; --fg: #1c1c1a; --muted: #6a6a64; --line: #e3e3dd;
@@ -89,17 +89,11 @@
   /* One size for the whole row: the label, the box, the button and the readout. */
   .north label, .north .note { display: flex; align-items: center; gap: 6px; font-size: 15px; color: var(--muted); margin: 0; }
   .north input { width: 5.5em; text-align: right; padding: 6px 8px; }
+  .north input[type=checkbox] { width: auto; margin: 0; }
   .north input:disabled { opacity: .5; }
   .north button { padding: 7px 14px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
   .north button:disabled { opacity: .5; cursor: default; }
 
-  /* Learning the bearing from GNSS: off by default, and shadow mode until asked. */
-  .learn { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
-           padding-top: 12px; border-top: 1px solid var(--line); }
-  .learn label { display: flex; align-items: center; gap: 6px; font-size: 15px; }
-  .learn input[type=checkbox] { width: auto; margin: 0; }
-  .learn .buttons { margin: 0; }
-  .learn .note { flex: 1 0 100%; margin: 0; }
   /* The compass tab: one column, sized to the phone it is held in. */
   .compass-view { display: flex; flex-direction: column; align-items: center; gap: 10px; }
   #compass { width: 100%; max-width: 340px; aspect-ratio: 1; touch-action: manipulation; }
@@ -123,7 +117,7 @@
 </head>
 <body>
 <header>
-  <h1>remote-gnss</h1>
+  <h1>Haydamaka-GNSS</h1>
   <nav role="tablist">
     <button role="tab" data-tab="compass" aria-selected="true">Compass</button>
     <button role="tab" data-tab="gnss" aria-selected="false">GNSS/Magnetometer</button>
@@ -207,15 +201,6 @@
             <input type="file" id="cal-file" accept=".csv,text/csv" hidden>
           </div>
         </div>
-        <div class="learn" id="learn">
-          <label><input type="checkbox" id="learn-on"> Learn the bearing while driving</label>
-          <label><input type="checkbox" id="learn-apply"> Use what it learns</label>
-          <div class="buttons pair">
-            <button class="secondary" type="button" id="learn-log">Download the drive log</button>
-            <button class="secondary" type="button" id="learn-reset">Start again</button>
-          </div>
-          <p class="note" id="learn-note">Loading…</p>
-        </div>
         <div class="north" id="north">
           <label>Bearing
             <input type="number" id="north-bearing" step="0.1" inputmode="decimal"
@@ -223,6 +208,7 @@
             <span>°</span>
           </label>
           <button class="secondary" type="button" id="north-set">Set bearing</button>
+          <label><input type="checkbox" id="auto-adjust"> Automatic adjustment</label>
           <p class="note" id="north-note"></p>
         </div>
       </div>
@@ -570,7 +556,7 @@ document.getElementById('ble-off').addEventListener('click', async () => {
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
 const view = {cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
-              fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0,
+              fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0, autoAdjust: false,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const LEVELS = ['sphere', 'per-axis', '9-parameter'];  // how many parameters the fit dares to use
@@ -620,50 +606,36 @@ function headingError() {
   return ((view.headingTarget - view.heading + 540) % 360) - 180;
 }
 
+// The bearing is the user's to type in only while nothing else is setting it:
+// not over the point cloud, where the offset turns the compass card and a
+// heading means nothing, and not while the automatic adjustment owns it.
+function updateBearingControls() {
+  const manual = view.mode === 'compass' && !view.autoAdjust;
+  for (const el of [$('north-set'), $('north-bearing')]) el.disabled = !manual;
+}
+
 function setMode(mode) {
   view.mode = mode;
   for (const input of document.querySelectorAll('input[name=plotview]')) {
     input.checked = input.value === mode;
   }
   $('plot').classList.toggle('sphere', mode === 'sphere');
-  // The offset turns the compass card, so a heading means nothing over the point cloud.
-  for (const el of [$('north-set'), $('north-bearing')]) el.disabled = mode !== 'compass';
+  updateBearingControls();
   if (mode === 'sphere' && view.cal && view.cal.points_seq !== view.pointsSeq) {
     fetchPoints().then(draw).catch(() => {});
   }
   animate();  // frame() draws once and stops if there's nothing to animate
 }
 
-// Learning the bearing from GNSS. This is the shadow-mode readout: the numbers
-// that say whether the estimate holds still are the point of it, not the offset.
+// The firmware can learn the bearing from GNSS while driving and apply it
+// itself. All of it -- what it has collected, how steady the estimate is, the
+// drive log, starting over -- is on /api/bearing, which the page deliberately
+// does not show: it is for servicing, not for the person using the device.
+// Here it is one switch, and while it is on the bearing is not theirs to set.
 function renderBearing(b) {
-  $('learn-on').checked = b.learning;
-  $('learn-apply').checked = b.applying;
-  $('learn-apply').disabled = !b.have;
-  const q = b.quality;
-  if (!b.learning) {
-    $('learn-note').textContent = 'Not collecting. Switch it on and drive; nothing changes until "Use what it learns" is ticked.';
-    return;
-  }
-  const drive = `${b.hours.toFixed(2)} h of driving above 11 km/h, ${b.windows} straight runs kept ` +
-                `of ${q.windows_seen} (${q.accept_pct.toFixed(0)} %), ${b.sectors} of 12 directions.`;
-  if (!b.sectors) {
-    // Say what stopped it, or a fruitless drive looks the same as no drive.
-    const worst = Object.entries(b.blocked || {}).sort((x, y) => y[1] - x[1])[0];
-    const why = worst ? ` Mostly: ${worst[0]} (${Math.round(100 * worst[1] / Math.max(1, b.fixes_seen))} % of fixes).` : '';
-    $('learn-note').textContent = `${drive} Nothing usable yet.${why}`;
-    return;
-  }
-  const stability = q.resid_n
-    ? ` Drifts ${q.drift_per_hour >= 0 ? '+' : ''}${q.drift_per_hour.toFixed(2)}°/h, ` +
-      `moved ${q.range.toFixed(2)}° at its widest, the two halves differ by ${q.split.toFixed(2)}°, ` +
-      `and it predicts the next run to ${q.resid_rms.toFixed(2)}°.`
-    : ' Not enough yet to say whether it holds still.';
-  const learned = ` Would set the offset to ${b.offset.toFixed(1)}°` +
-    (b.terms > 1 ? `, with ${b.once_round.toFixed(2)}° once-round and ${b.twice_round.toFixed(2)}° twice-round ` +
-                   `(${b.residual_hard_ut.toFixed(2)} µT of hard iron and ${b.soft_asym_pct.toFixed(1)} % axis asymmetry left in the calibration)` : '') + '.';
-  $('learn-note').textContent = drive + learned + stability +
-    (b.remounts ? ` Started over ${b.remounts} time(s).` : '');
+  view.autoAdjust = b.learning && b.applying;
+  $('auto-adjust').checked = view.autoAdjust;
+  updateBearingControls();
 }
 
 async function pollBearing() {
@@ -691,17 +663,18 @@ async function bearingPost(body) {
   }
   await pollBearing();          // put the checkboxes back where the device has them
   if (why) {
-    $('learn-note').textContent = why;   // after the poll, so it is not overwritten
+    northSays(why);   // after the poll, so it is not overwritten
   }
 }
-$('learn-on').onchange = () => bearingPost(`learning=${$('learn-on').checked ? 1 : 0}`);
-$('learn-apply').onchange = () => bearingPost(`applying=${$('learn-apply').checked ? 1 : 0}`);
-$('learn-reset').onclick = () => {
-  if (confirm('Throw away everything learned from driving, and the log of it?')) {
-    bearingPost('reset=1');
-  }
+// Collecting and applying move together: a switch that collected without
+// applying would look like it did nothing at all.
+$('auto-adjust').onchange = () => {
+  const on = $('auto-adjust').checked;
+  view.autoAdjust = on;
+  updateBearingControls();
+  northSays(on ? 'Adjusting itself from now on, as you drive.' : 'Automatic adjustment off.');
+  bearingPost(`learning=${on ? 1 : 0}&applying=${on ? 1 : 0}`);
 };
-$('learn-log').onclick = () => { location.href = '/api/bearing/log'; };
 
 const quantile = (sorted, q) => sorted[Math.floor(q * (sorted.length - 1))];
 
