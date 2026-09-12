@@ -2,7 +2,9 @@
 
 ESP-IDF v5.5 firmware for an ESP32-C3 SuperMini with a GNSS receiver and a
 magnetometer. [SPEC.md](SPEC.md) holds the requirements,
-[CALIBRATION.md](CALIBRATION.md) the calibration algorithm.
+[CALIBRATION.md](CALIBRATION.md) the calibration algorithm, and
+[MEMORY-OPTIMIZATIONS.md](MEMORY-OPTIMIZATIONS.md) what the board can spare -
+read it before adding a buffer.
 
 ## Commits
 
