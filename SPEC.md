@@ -132,6 +132,10 @@ trusted. Two independent sources, because either alone can be fooled:
   in the readout. The current correction is shown under the button.
 - Both controls are disabled in sphere view, where a heading means nothing.
 - The row shows the resulting offset, signed, next to the button.
+- **Learning the offset from GNSS:** when the device is moving and the fix is
+  not spoofed, the GNSS course over ground says which way it is travelling, and
+  the difference from the measured heading is the mounting offset. Switched on
+  with a checkbox. Plan: [BEARING-CALIBRATION.md](BEARING-CALIBRATION.md).
 
 ## Magnetometer calibration
 
