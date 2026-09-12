@@ -1,6 +1,7 @@
 # Learning the bearing offset from GNSS — proposal
 
-Status: **plan only**, nothing implemented. The manual path exists today: point
+Status: **prototype**, not in the firmware. `bearing_cal.c` implements all of
+this and passes the synthetic trips of §9; it has not been on the device. The manual path exists today: point
 the module along a known bearing, type the bearing in, press **Set bearing**,
 and the firmware stores `heading_offset` in NVS (SPEC.md, "Compass bearing").
 
@@ -149,34 +150,41 @@ without anyone having to model hedges.
 
 ### 3.3.1 How long should the window be?
 
-**8 seconds**, with non-overlapping windows.
+**8 seconds**, with non-overlapping windows — but for a narrower reason than it
+first appears, and the first reason given here was wrong. See §9.
 
-The instinct is that longer is better — more averaging, stronger evidence of
-straightness. It is wrong here, for a reason that has nothing to do with
-statistics:
+The argument that suggested itself was that long windows are only accepted on
+long straight roads, and long straight roads all point the same way, so a long
+window would starve §3.4 of directions. **Measurement says no.** A simulated
+motorway trip fills 3 of 12 sectors at *every* window length from 4 s to 27 s,
+because it is the route that has two directions, not the window. Shortening the
+window buys more samples from the same three sectors and nothing else. Heading
+diversity is a property of where the vehicle went; no window length rescues it,
+and §3.4's refusal to apply an estimate is the only defence.
 
-> **Long windows are only accepted on long straight roads, and long straight
-> roads all point the same way.**
+What the window length does control is **yield**, and it falls off a cliff:
 
-Motorways and trunk roads run in a handful of directions. If the estimator only
-ever accepts 30-second windows, every sample it gets comes from two or three
-compass sectors, §3.4 never fills, and what does get through is the heading
-error of those particular directions applied to all of them. A window length
-that accepts a turn onto a side street, a run down it, and the run after the
-next junction is worth far more than one that accepts only the bypass.
+- below ~6 s the straightness test has too little to work with, the per-window
+  scatter rises, and each window is weak evidence;
+- above ~12 s a town trip starts losing whole sectors — at 18 s it fills 9 of 12
+  instead of 12, and at 27 s a half-hour of town driving produces **no accepted
+  windows at all**;
+- on a grid of main roads, 18 s and longer drops the sector count far enough
+  that the significance test of §3.5 gives up on the harmonics entirely, and the
+  worst corrected heading error goes from 0.4° to 2.2°.
 
-The statistical argument agrees, weakly. With a correlation time of ~5 s, a
-window holds about `T/5` independent course samples, so the accuracy of one
-window improves only as `sqrt(T)` — 16 s is 1.4 times better than 8 s — while
-the *number* of windows a trip yields falls much faster than that, because a
-run has to be entirely straight to count at all.
+So the usable band is **6-12 s**, and 8 s sits in the middle of it.
 
-| T | independent samples | accuracy of one window | where it gets accepted |
-|---|---|---|---|
-| 4 s | ~0.8 | poor; barely evidence of anything | almost anywhere, including between two turns |
-| **8 s** | ~1.6 | ~1.5-2° at 3 m/s, better when faster | most urban straight runs between junctions |
-| 16 s | ~3 | ~1-1.4° | main roads |
-| 30 s | ~6 | ~0.8-1° | motorways, and little else |
+The accuracy of a single window barely enters into it. With a correlation time
+of ~5 s a window holds about `T/5` independent course samples, so it improves
+only as `sqrt(T)`:
+
+| T | independent samples | accuracy of one window |
+|---|---|---|
+| 4 s | ~0.8 | poor; barely evidence of anything |
+| **8 s** | ~1.6 | ~1.5-2° at 3 m/s, better when faster |
+| 16 s | ~3 | ~1-1.4° |
+| 30 s | ~6 | ~0.8-1° |
 
 Since the whole trip is accumulated anyway (§3.1) the per-window accuracy hardly
 matters: 40 windows at 2° beat 8 windows at 1°, and they arrive from more
@@ -371,3 +379,64 @@ moved by more than 0.5°: this runs for hours and flash wears out.
   calibration is bad should be recalibrated rather than curve-fitted. The
   argument for applying them is the vehicle that cannot easily be recalibrated
   in place.
+
+## 9. Measured (2026-09-12)
+
+The prototype is `bearing_cal.c` / `bearing_cal.h`, host-testable with no RTOS
+or storage, plus `bearing_test.c` (synthetic trips) and `window_sweep.c`.
+
+**It recovers what it should.** A simulated magnetometer with 0.34 µT of
+leftover hard iron and 3.7 % of axis asymmetry — chosen because §3.5 predicts
+each is worth about 1° — gives back, after two town trips:
+
+| | found | predicted |
+|---|---|---|
+| mounting offset | 41.96° | 42.00° |
+| once-round amplitude | 0.90° | 1.00° |
+| twice-round amplitude | 1.10° | 1.06° |
+| residual hard iron | 0.30 µT | 0.34 µT |
+| axis asymmetry | 3.83 % | 3.70 % |
+
+Worst corrected heading error over all 360°: **0.26°**. So the deviation
+analysis of §3.5 is not just a framing — the coefficients come back as the
+physics says they should, and they read back as the calibration error that
+produced them.
+
+**It refuses when it should.** A trip that never stops turning accepts 0 of 74
+windows. An hour up and down one road accepts 259 windows, fills 2 sectors, and
+still says no. Car parks, tunnels, stops and a module sliding about in the cup
+holder leave the estimate within 1.5° of truth, the reversing windows landing in
+`disagrees` and the sliding ones in `speed changed`.
+
+**Window length, 30 minutes of driving each:**
+
+| route | T = 4 s | 8 s | 12 s | 18 s | 27 s |
+|---|---|---|---|---|---|
+| town — windows | 284 | 99 | 48 | 12 | **0** |
+| town — sectors | 12/12 | 12/12 | 12/12 | 9/12 | 0/12 |
+| town — worst error | 0.13° | 0.09° | 0.08° | 0.53° | refuses |
+| main roads — sectors | 9/12 | 9/12 | 9/12 | 7/12 | 6/12 |
+| main roads — worst error | 0.42° | 0.40° | 0.46° | 2.13° | 2.23° |
+| motorway — sectors | 3/12 | 3/12 | 3/12 | 3/12 | 3/12 |
+
+The motorway row corrects §3.3.1's original argument; the town row sets the
+upper limit.
+
+**Remount recovery had to be added.** The first version could not follow the
+module being moved: the §4 outlier gate rejected every window that disagreed
+with the settled estimate, for ever — exactly the entrenchment §8 worried
+about. Windows refused as `disagrees` are now kept, and when enough of them
+agree with *each other* rather than with the estimate, the estimate is the thing
+that is wrong: everything is thrown away and rebuilt from them. A 90° remount is
+followed within a few trips.
+
+**Cost.** 744 bytes of state, of which the 144 bytes of sector accumulators are
+all that needs saving to NVS. 7.4 kB of code compiled for the ESP32-C3. 0.06 µs
+per fix and 1.1 µs per fit on the host — so a few microseconds per fix and well
+under a millisecond per window in software floating point, against one window
+every eight seconds.
+
+**Still untested: everything about the real world.** There is no tilt in the
+simulation, no crab angle, no multipath, no lorry going past, and the course
+noise is Gaussian, which real GNSS course error is not. Shadow mode (§5) is
+there to find out what that costs.
