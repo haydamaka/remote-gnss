@@ -90,10 +90,11 @@ menu "Remote GNSS"
         config RGNSS_NMEA_SUBSCRIBERS
             int "Outputs the sentence stream can feed at once"
             range 1 12
-            default 6
+            default 5
             help
-                One per connected TCP client, plus one for the BLE link. Each costs
-                a 2 KB buffer, allocated when it is first used.
+                One per connected TCP client, plus one for the BLE link, so the
+                default matches four TCP clients and BLE. Each costs a buffer,
+                and they are all allocated at start-up.
 
         config RGNSS_NMEA_TYPES
             string "Sentence types to send (empty for all)"

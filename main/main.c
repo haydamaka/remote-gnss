@@ -56,6 +56,9 @@ void app_main(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_ble_start());
 #endif
 
-    ESP_ERROR_CHECK(mdns_service_start());
-    ESP_ERROR_CHECK(webserver_start());
+    // Not fatal either. An abort here costs a USB cable: the device is updated
+    // over WiFi, and a firmware that panics in app_main can't be replaced by
+    // the very server that would have replaced it.
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_service_start());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(webserver_start());
 }

@@ -2,14 +2,18 @@
 
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/message_buffer.h"
 #include "freertos/semphr.h"
 
-// About 180 ms of the receiver's output at 115200 baud: enough to ride out a
-// WiFi retransmit or a BLE connection event without dropping anything.
-#define SUB_BUF_SIZE 2048
+// Close to a second of the filtered stream: enough to ride out a WiFi
+// retransmit or a BLE connection event. Every slot holds one, and they are
+// allocated together at start-up -- the BLE controller takes a large bite out
+// of the heap when it starts, and a buffer that could not be allocated
+// afterwards would silently leave an output with nothing to read.
+#define SUB_BUF_SIZE 1536
 
 static const char *TAG = "nmea_hub";
 
@@ -17,7 +21,7 @@ static const char *TAG = "nmea_hub";
 // never writes a message partially: a send that doesn't fit fails outright,
 // which is exactly the "whole sentences or nothing" the subscribers need.
 struct nmea_sub {
-    MessageBufferHandle_t buf;  // created on first use, then reused by later subscribers
+    MessageBufferHandle_t buf;  // created at init, then reused by every subscriber
     const char *name;
     bool active;
     uint32_t sentences;
@@ -31,10 +35,23 @@ static SemaphoreHandle_t lock;
 esp_err_t nmea_hub_init(void)
 {
     if (lock != NULL) {
-        return ESP_OK;
+        return ESP_OK;  // whichever output started first did this
     }
     lock = xSemaphoreCreateMutex();
-    return lock != NULL ? ESP_OK : ESP_ERR_NO_MEM;
+    if (lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    for (size_t i = 0; i < sizeof(subs) / sizeof(subs[0]); i++) {
+        subs[i].buf = xMessageBufferCreate(SUB_BUF_SIZE);
+        if (subs[i].buf == NULL) {
+            ESP_LOGE(TAG, "only %u of %d buffers fit; %u bytes of heap left", (unsigned)i,
+                     CONFIG_RGNSS_NMEA_SUBSCRIBERS, (unsigned)esp_get_free_heap_size());
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    ESP_LOGI(TAG, "%d subscriber buffers of %d bytes; %u bytes of heap left", CONFIG_RGNSS_NMEA_SUBSCRIBERS,
+             SUB_BUF_SIZE, (unsigned)esp_get_free_heap_size());
+    return ESP_OK;
 }
 
 // True when the sentence's three-character type is one the outputs asked for.
@@ -102,12 +119,6 @@ nmea_sub_t nmea_hub_subscribe(const char *name)
         struct nmea_sub *s = &subs[i];
         if (s->active) {
             continue;
-        }
-        if (s->buf == NULL) {
-            s->buf = xMessageBufferCreate(SUB_BUF_SIZE);
-            if (s->buf == NULL) {
-                break;  // out of heap; the caller gets NULL and gives up
-            }
         }
         // Reset here rather than on unsubscribe: at this point nothing is
         // publishing into the buffer, so there is no race with a send.
