@@ -13,6 +13,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "nmea_hub.h"
+#include "wifi.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -53,6 +54,7 @@ static volatile bool subscribed;
 static char peer[18];
 static nmea_sub_t sub;
 static uint32_t dropped;
+static bool advertising;
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 
@@ -134,7 +136,35 @@ static void advertise(void)
         ESP_LOGE(TAG, "adv_start: %d", rc);
         return;
     }
+    advertising = true;
     ESP_LOGI(TAG, "advertising as %s", name);
+}
+
+// Advertising is cheap but not free, and on a one-radio chip "not free" is the
+// difference between a station that completes a WPA2 handshake and one that
+// does not. So it runs only once WiFi has settled -- joined, or given up and
+// brought up its own access point -- and goes quiet again while the station is
+// between connections, which is exactly when it needs the air.
+//
+// An established BLE connection is left alone: a client that asked for BLE
+// keeps it, and the station does without until that client goes away.
+static void follow_wifi(void)
+{
+    if (conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        return;
+    }
+    wifi_status_t wifi;
+    wifi_get_status(&wifi);
+    bool settled = wifi.sta_connected || wifi.ap_active;
+
+    if (settled && !advertising) {
+        advertise();
+    } else if (!settled && advertising) {
+        if (ble_gap_adv_stop() == 0) {
+            advertising = false;
+            ESP_LOGI(TAG, "quiet while the station reconnects");
+        }
+    }
 }
 
 static int gap_event(struct ble_gap_event *event, void *arg)
@@ -142,10 +172,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status != 0) {
-            advertise();
-            break;
+            advertising = false;
+            break;  // follow_wifi() advertises again once WiFi allows it
         }
         conn_handle = event->connect.conn_handle;
+        advertising = false;
         struct ble_gap_conn_desc desc;
         if (ble_gap_conn_find(conn_handle, &desc) == 0) {
             const uint8_t *a = desc.peer_id_addr.val;  // stored little endian
@@ -168,7 +199,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         subscribed = false;
         peer[0] = '\0';
-        advertise();
+        // Not advertise(): the station has very likely been knocked off the
+        // air by this connection, and it gets the radio back first.
         break;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -183,7 +215,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
-        advertise();
+        advertising = false;
         break;
 
     default:
@@ -204,7 +236,7 @@ static void on_sync(void)
         ESP_LOGE(TAG, "infer_auto: %d", rc);
         return;
     }
-    advertise();
+    follow_wifi();
 }
 
 static void on_reset(int reason)
@@ -254,7 +286,8 @@ static void pump_task(void *arg)
                 sub = NULL;
             }
             len = off = 0;
-            vTaskDelay(pdMS_TO_TICKS(200));
+            follow_wifi();
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
         if (sub == NULL) {
