@@ -85,6 +85,44 @@ menu "Remote GNSS"
 
     endmenu
 
+    menu "NMEA output"
+
+        config RGNSS_NMEA_SUBSCRIBERS
+            int "Outputs the sentence stream can feed at once"
+            range 1 12
+            default 6
+            help
+                One per connected TCP client, plus one for the BLE link. Each costs
+                a 2 KB buffer, allocated when it is first used.
+
+        config RGNSS_TCP_ENABLED
+            bool "Serve NMEA over TCP"
+            default y
+
+        config RGNSS_TCP_PORT
+            int "TCP port"
+            range 1 65535
+            default 10110
+            depends on RGNSS_TCP_ENABLED
+            help
+                10110 is the registered port for NMEA-0183 navigational data.
+                gpsd takes it as tcp://host:10110.
+
+        config RGNSS_TCP_MAX_CLIENTS
+            int "TCP clients at once"
+            range 1 8
+            default 4
+            depends on RGNSS_TCP_ENABLED
+
+        config RGNSS_BLE_ENABLED
+            bool "Serve NMEA over BLE (Nordic UART Service)"
+            default y
+            help
+                Needs Bluetooth and NimBLE enabled, which sdkconfig.defaults does.
+                The ESP32-C3 has no Bluetooth Classic, so this is BLE only: no SPP.
+
+    endmenu
+
     menu "Magnetometer"
 
         comment "Leave GPIO 2, 8, 9, 20 and 21 alone: strapping pin, LED, BOOT and the console"

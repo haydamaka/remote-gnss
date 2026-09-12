@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "minmea.h"
+#include "nmea_hub.h"
 
 #define GNSS_UART UART_NUM_1
 #define UART_RX_BUF_SIZE 2048
@@ -293,7 +294,17 @@ static void reader_task(void *arg)
                 len = 0;
             }
             if (c == '\n') {
+                while (len > 0 && line[len - 1] == '\r') {
+                    len--;
+                }
                 line[len] = '\0';
+                // Out to the network and BLE before parsing: subscribers want
+                // the sentence types minmea has no struct for (GSV, GLL, ...)
+                // as well. minmea_check screens out the wreckage the binary
+                // UBX frames leave behind.
+                if (len > 0 && line[0] == '$' && minmea_check(line, false)) {
+                    nmea_hub_publish(line, len);
+                }
                 handle_sentence(line);
                 len = 0;
             } else if (len < sizeof(line) - 1) {

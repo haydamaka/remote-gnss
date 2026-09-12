@@ -8,6 +8,8 @@
 #include "mag_cal.h"
 #include "magnetometer.h"
 #include "mdns_service.h"
+#include "nmea_ble.h"
+#include "nmea_tcp.h"
 #include "webserver.h"
 #include "wifi.h"
 
@@ -42,6 +44,15 @@ void app_main(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(gnss_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(magnetometer_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(mag_cal_init());
+
+    // Wireless GNSS out to a PC or a phone. Neither is fatal: the web page and
+    // the receiver work without them.
+#if CONFIG_RGNSS_TCP_ENABLED
+    ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_tcp_start());
+#endif
+#if CONFIG_RGNSS_BLE_ENABLED
+    ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_ble_start());
+#endif
 
     ESP_ERROR_CHECK(mdns_service_start());
     ESP_ERROR_CHECK(webserver_start());
