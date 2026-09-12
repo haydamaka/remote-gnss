@@ -18,7 +18,9 @@
 _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer readings than the buffer holds");
 
 #define NVS_NAMESPACE "magcal"
-#define NVS_VERSION 2  // 2 added the rough flag
+// Version 2's "rough" byte became the quality, and its values still mean the
+// same thing (0 good, 1 rough), so stored calibrations survive the change.
+#define NVS_VERSION 2
 #define TASK_PERIOD_MS 100
 #define REFIT_AFTER 20                // new readings before fitting again
 #define FIT_EVERY_US (3 * 1000000LL)  // and no sooner: a fit costs a good fraction of a second
@@ -65,7 +67,7 @@ typedef struct {
 
 typedef struct {
     uint8_t version;
-    uint8_t rough;
+    uint8_t quality;
     float offset[3];
     float matrix[9];
     float radius;
@@ -78,6 +80,8 @@ static SemaphoreHandle_t lock;
 static mag_cal_state_t state = MAG_CAL_IDLE;
 static char reason_buf[64];    // empty unless the last session failed
 static char blocking_buf[64];  // which criterion is holding a running session up
+static char message_buf[200];  // how the last session ended, in plain words
+static bool fit_tidied;        // the latest fit was refitted on its inliers
 static point_t points[MAG_CAL_MAX_POINTS];
 static uint16_t npoints;
 static uint32_t arrivals;
@@ -333,11 +337,30 @@ static const char *unmet(char *buf, size_t size)
     return unmet_at(false, buf, size);
 }
 
-// Whether the fit could be saved as a rough calibration right now.
-static bool acceptable_rough(void)
+static const char *quality_word(uint8_t quality)
+{
+    return quality == MAG_CAL_GOOD ? "good" : quality == MAG_CAL_ROUGH ? "rough" : "poor";
+}
+
+// Where the latest fit stands against the two limits.
+static mag_cal_quality_t quality_of(void)
 {
     char scratch[sizeof(reason_buf)];
-    return unmet_at(true, scratch, sizeof(scratch)) == NULL;
+    if (!unmet_at(false, scratch, sizeof(scratch))) {
+        return MAG_CAL_GOOD;
+    }
+    if (!unmet_at(true, scratch, sizeof(scratch))) {
+        return MAG_CAL_ROUGH;
+    }
+    return MAG_CAL_POOR;
+}
+
+// Worth keeping at all: the numbers are physical and enough of the sphere was
+// seen for them to mean something. A poor calibration still beats none.
+static bool worth_saving(void)
+{
+    return have_fit && fit.radius >= RADIUS_MIN && fit.radius <= RADIUS_MAX && fit.eig_min >= EIG_MIN &&
+           fit.eig_max <= EIG_MAX && fit.cells >= 50 && coverage >= 0.5f;
 }
 
 static bool settled(const mag_fit_t *a, const mag_fit_t *b)
@@ -385,6 +408,8 @@ static uint16_t pack_points(int16_t (*packed)[3])
 static void fail(const char *text)
 {
     strlcpy(reason_buf, text, sizeof(reason_buf));
+    snprintf(message_buf, sizeof(message_buf), "Nothing usable to save: %s. %s", text,
+             params.valid ? "The previous calibration stays in use." : "The compass is using raw readings.");
     state = MAG_CAL_FAILED;
     points_dirty = true;  // keep the progress for the next session
     ESP_LOGW(TAG, "calibration failed: %s", reason_buf);
@@ -395,7 +420,7 @@ static void fail(const char *text)
 static void flush_nvs(void)
 {
     static int16_t packed[MAG_CAL_MAX_POINTS][3];  // 0.1 µT units
-    stored_params_t sp = {.version = NVS_VERSION, .rough = params.rough};
+    stored_params_t sp = {.version = NVS_VERSION, .quality = params.quality};
     uint16_t n;
     bool write_params;
 
@@ -457,15 +482,15 @@ static void load(void)
     esp_err_t err = nvs_get_blob(nvs, "params", &sp, &len);
     if (err == ESP_OK && len == sizeof(sp) && sp.version == NVS_VERSION) {
         params.valid = true;
-        params.rough = sp.rough;
+        params.quality = sp.quality;
         memcpy(params.offset, sp.offset, sizeof(params.offset));
         memcpy(params.matrix, sp.matrix, sizeof(params.matrix));
         params.radius = sp.radius;
         params.fit_rms = sp.fit_rms;
         params.points = sp.points;
         memcpy(centre, sp.offset, sizeof(centre));
-        ESP_LOGI(TAG, "calibration%s: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.1f %%",
-                 params.rough ? " (rough)" : "", params.offset[0], params.offset[1], params.offset[2],
+        ESP_LOGI(TAG, "calibration (%s): offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.1f %%",
+                 quality_word(params.quality), params.offset[0], params.offset[1], params.offset[2],
                  params.radius, params.fit_rms * 100);
     } else if (err == ESP_OK) {
         ESP_LOGW(TAG, "saved calibration from another version; ignored");
@@ -493,12 +518,13 @@ static void load(void)
     }
 }
 
-// With the lock held.
-static void finish(bool rough)
+// With the lock held. Every ending saves something if it is worth saving, and
+// says plainly what the user got.
+static void finish(mag_cal_quality_t quality)
 {
     params_before_save = params;
     params.valid = true;
-    params.rough = rough;
+    params.quality = quality;
     memcpy(params.offset, fit.offset, sizeof(params.offset));
     memcpy(params.matrix, fit.matrix, sizeof(params.matrix));
     params.radius = fit.radius;
@@ -536,6 +562,31 @@ static void finish(bool rough)
 // A fit costs a good fraction of a second on this chip, so it runs on a copy
 // with the lock released, and its result is only used if the session it belongs
 // to is still the current one.
+// A mathematical cleanup: refit on just the readings the fit kept, so strays
+// stop pulling on the answer. Taken only when it keeps most of the readings,
+// really improves, and barely moves the centre — otherwise it would just be
+// inventing a nicer-looking number.
+static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t *fit_io)
+{
+    static float kept[MAG_CAL_MAX_POINTS][3];
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (keep[i]) {
+            memcpy(kept[k++], pts[i], sizeof(kept[0]));
+        }
+    }
+    if (k < MIN_FIT_POINTS || k * 10 < n * 7) {
+        return false;
+    }
+    mag_fit_t tidy;
+    if (!mag_fit(kept, k, 0.0f, fit_io, &tidy, NULL) || tidy.rms > fit_io->rms * 0.9f ||
+        dist(tidy.offset, fit_io->offset) > TIDY_MAX_SHIFT_UT) {
+        return false;
+    }
+    *fit_io = tidy;
+    return true;
+}
+
 static void run_fit(void)
 {
     static float snapshot[MAG_CAL_MAX_POINTS][3];
@@ -610,12 +661,13 @@ static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t
         }
         strlcpy(blocking_buf, missing_criterion ? missing_criterion : "", sizeof(blocking_buf));
         if (!missing_criterion && session_new >= SESSION_MIN_NEW) {
-            finish(false);
+            finish(MAG_CAL_GOOD);
         } else if (esp_timer_get_time() - session_start > SESSION_TIMEOUT_US) {
             // Rather than throw away five minutes of turning, keep what is usable.
-            if (session_new >= SESSION_MIN_NEW && acceptable_rough()) {
-                finish(true);
-                ESP_LOGW(TAG, "quality bar not met (%s), saved as rough", missing_criterion);
+            if (session_new >= SESSION_MIN_NEW && worth_saving()) {
+                finish(quality_of());
+                ESP_LOGW(TAG, "quality bar not met (%s), saved as %s", missing_criterion,
+                         quality_word(params.quality));
             } else {
                 char text[sizeof(reason_buf)];
                 snprintf(text, sizeof(text), "Gave up after 5 minutes: %s",
@@ -704,7 +756,9 @@ esp_err_t mag_cal_begin(bool fresh)
     update_progress();
     reason_buf[0] = '\0';
     blocking_buf[0] = '\0';
-    have_fit = false;  // start the stability count over, and refit from scratch
+    message_buf[0] = '\0';
+    have_fit = false;
+    fit_tidied = false;  // start the stability count over, and refit from scratch
     stable_count = 0;
     fit_ms = 0;
     session_new = 0;
@@ -721,52 +775,21 @@ void mag_cal_stop(void)
 {
     xSemaphoreTake(lock, portMAX_DELAY);
     if (state == MAG_CAL_RUNNING) {
-        state = MAG_CAL_STOPPED;
+        // Keep whatever was earned, rather than ending with nothing.
+        if (session_new >= SESSION_MIN_NEW && worth_saving()) {
+            finish(quality_of());
+            state = MAG_CAL_STOPPED;
+        } else {
+            state = MAG_CAL_STOPPED;
+            snprintf(message_buf, sizeof(message_buf), "Stopped at %.0f %%. Too little to save; %s", progress * 100,
+                     params.valid ? "the previous calibration stays in use." : "the compass uses raw readings.");
+        }
         points_dirty = true;  // the task writes it, off this thread
         ESP_LOGI(TAG, "calibration stopped at %.0f %%", progress * 100);
     }
     xSemaphoreGive(lock);
 }
 
-esp_err_t mag_cal_accept(void)
-{
-    esp_err_t err = ESP_ERR_INVALID_STATE;
-    xSemaphoreTake(lock, portMAX_DELAY);
-    if (state == MAG_CAL_RUNNING && acceptable_rough()) {
-        finish(true);
-        err = ESP_OK;
-    }
-    xSemaphoreGive(lock);
-    return err;
-    session_refused = 0;
-}
-
-void mag_cal_get_status(mag_cal_status_t *out)
-{
-    xSemaphoreTake(lock, portMAX_DELAY);
-    *out = (mag_cal_status_t){
-        .state = state,
-        .can_accept = state == MAG_CAL_RUNNING && acceptable_rough(),
-        .progress = progress,
-        .coverage = coverage,
-        .missing = missing,
-        .centre = {centre[0], centre[1], centre[2]},
-        .points = npoints,
-        .params = params,
-        .have_fit = have_fit,
-        .fit = fit,
-        .fit_ms = fit_ms,
-    };
-    strlcpy(out->reason, reason_buf, sizeof(out->reason));
-    strlcpy(out->blocking, blocking_buf, sizeof(out->blocking));
-    xSemaphoreGive(lock);
-}
-
-size_t mag_cal_get_points(float (*out)[3], size_t max)
-{
-    xSemaphoreTake(lock, portMAX_DELAY);
-    size_t n = npoints < max ? npoints : max;
-    for (size_t i = 0; i < n; i++) {
 esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
 {
     ESP_RETURN_ON_FALSE(started, ESP_ERR_INVALID_STATE, TAG, "calibration task not running");
@@ -784,6 +807,46 @@ esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
         points[npoints].v[1] = pts[i][1];
         points[npoints].v[2] = pts[i][2];
         points[npoints].order = i;
+esp_err_t mag_cal_accept(void)
+{
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (state == MAG_CAL_RUNNING && session_new >= SESSION_MIN_NEW && worth_saving()) {
+        finish(quality_of());
+        err = ESP_OK;
+    }
+    xSemaphoreGive(lock);
+    return err;
+}
+
+void mag_cal_get_status(mag_cal_status_t *out)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    *out = (mag_cal_status_t){
+        .state = state,
+        .can_accept = state == MAG_CAL_RUNNING && session_new >= SESSION_MIN_NEW && worth_saving(),
+        .progress = progress,
+        .coverage = coverage,
+        .missing = missing,
+        .centre = {centre[0], centre[1], centre[2]},
+        .points = npoints,
+        .refused = session_refused,
+        .params = params,
+        .have_fit = have_fit,
+        .fit = fit,
+        .fit_ms = fit_ms,
+    };
+    strlcpy(out->reason, reason_buf, sizeof(out->reason));
+    strlcpy(out->blocking, blocking_buf, sizeof(out->blocking));
+    strlcpy(out->message, message_buf, sizeof(out->message));
+    xSemaphoreGive(lock);
+}
+
+size_t mag_cal_get_points(float (*out)[3], size_t max)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    size_t n = npoints < max ? npoints : max;
+    for (size_t i = 0; i < n; i++) {
         points[npoints].cell = 0;
         npoints++;
     }

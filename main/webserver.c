@@ -381,7 +381,8 @@ static esp_err_t cal_get(httpd_req_t *req)
         json_floats(&j, "matrix", s.params.matrix, 9, 4);
         json_num(&j, "radius", s.params.radius, 2);
         json_num(&j, "rms", s.params.fit_rms, 4);
-        json_bool(&j, "rough", s.params.rough);
+        json_str(&j, "quality", s.params.quality == MAG_CAL_GOOD ? "good"
+                                : s.params.quality == MAG_CAL_ROUGH ? "rough" : "poor");
         json_int(&j, "points", s.params.points);
         json_close(&j);
     } else {
@@ -423,9 +424,6 @@ static esp_err_t cal_start_post(httpd_req_t *req)
     return reply(req, HTTPD_200, NULL);
 }
 
-// Saves a fit that is usable but below the quality bar, labelled as rough.
-static esp_err_t cal_accept_post(httpd_req_t *req)
-{
 // Readings from a CSV the user saved earlier: any line whose first three
 // numbers parse is taken, so both our column layouts work and a header is
 // simply skipped.
@@ -487,6 +485,9 @@ static esp_err_t cal_points_post(httpd_req_t *req)
     return reply(req, HTTPD_200, NULL);
 }
 
+// Saves a fit that is usable but below the quality bar, labelled as rough.
+static esp_err_t cal_accept_post(httpd_req_t *req)
+{
     if (mag_cal_accept() != ESP_OK) {
         return reply(req, HTTPD_400, "The fit isn't good enough to save yet");
     }

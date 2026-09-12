@@ -596,8 +596,8 @@ function renderCal() {
     [text, cls, hint] = [`Stopped at ${pct} %`, 'warn', kept];
   } else if (c.cal) {
     const label = c.state === 'done' ? 'Calibration saved' : 'Calibrated';
-    text = c.cal.rough ? `${label} · rough · ${summary}` : `${label} · ${summary}`;
-    cls = c.cal.rough ? 'warn' : 'ok';
+    text = c.cal.quality === 'good' ? `${label} · ${summary}` : `${label} · ${c.cal.quality} · ${summary}`;
+    cls = c.cal.quality === 'good' ? 'ok' : 'warn';
     hint = 'The arrow is the current field; the dots are the calibration readings. ' +
       'Calibrate again continues from them; Reset and calibrate discards them. Offsets only for now: the full 9-parameter fit follows.';
   } else if (saved) {

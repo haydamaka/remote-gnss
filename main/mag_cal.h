@@ -28,9 +28,17 @@ typedef enum {
 } mag_cal_state_t;
 
 // b = matrix · (m − offset), in µT.
+// How much to trust a saved calibration. Anything but NONE is applied: a
+// compass that works with a warning beats one that refuses to work.
+typedef enum {
+    MAG_CAL_GOOD,   // met every criterion of CALIBRATION.md section 2
+    MAG_CAL_ROUGH,  // usable, above the good limit
+    MAG_CAL_POOR,   // plausible but well off; the page warns
+} mag_cal_quality_t;
+
 typedef struct {
     bool valid;
-    bool rough;       // accepted below the quality bar: usable, but say so
+    mag_cal_quality_t quality;
     float offset[3];
     float matrix[9];  // row-major
     float radius;     // µT
@@ -42,6 +50,7 @@ typedef struct {
     mag_cal_state_t state;
     char reason[64];            // why it failed, else empty
     char blocking[64];          // what a running session is still waiting for, else empty
+    char message[200];          // how the last session ended, for the user
     float progress;             // 0..1, 1 exactly when complete
     float coverage;             // share of cells holding ≥ 2 readings
     uint8_t missing;            // bit k: cap k of +X −X +Y −Y +Z −Z not reached
