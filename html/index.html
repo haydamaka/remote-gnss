@@ -135,6 +135,7 @@
           <div class="buttons">
             <button class="primary" type="button" id="cal-start">Calibrate</button>
             <button class="secondary" type="button" id="cal-fresh" hidden>Reset and calibrate</button>
+            <button class="secondary" type="button" id="cal-accept" hidden>Save anyway</button>
             <button class="secondary" type="button" id="cal-stop" hidden>Stop</button>
           </div>
         </div>
@@ -561,6 +562,7 @@ function renderCal() {
   $('cal-start').hidden = running;
   $('cal-fresh').hidden = running || !saved;
   $('cal-stop').hidden = !running;
+  $('cal-accept').hidden = !(running && c.can_accept);
   $('cal-start').textContent = !saved ? 'Calibrate' : c.cal ? 'Calibrate again' : 'Continue calibration';
   $('cal-barbox').hidden = !running && (c.cal || !saved);
   $('cal-bar').style.width = pct + '%';
@@ -580,13 +582,17 @@ function renderCal() {
       hint += ` Fit so far: ${(c.fit.rms * 100).toFixed(1)} % off the sphere with the ${LEVELS[c.fit.level]} model, ` +
         `${c.fit.inliers} of ${c.fit.points} readings used.`;
     }
+    if (c.can_accept) {
+      hint += ' Save anyway keeps this as a rough calibration — usable, just not as good as it could be.';
+    }
   } else if (c.state === 'failed') {
     [text, cls, hint] = [`Calibration failed: ${c.reason || 'unknown reason'}`, 'bad', kept];
   } else if (c.state === 'stopped') {
     [text, cls, hint] = [`Stopped at ${pct} %`, 'warn', kept];
   } else if (c.cal) {
-    text = `${c.state === 'done' ? 'Calibration saved' : 'Calibrated'} · ${summary}`;
-    cls = 'ok';
+    const label = c.state === 'done' ? 'Calibration saved' : 'Calibrated';
+    text = c.cal.rough ? `${label} · rough · ${summary}` : `${label} · ${summary}`;
+    cls = c.cal.rough ? 'warn' : 'ok';
     hint = 'The arrow is the current field; the dots are the calibration readings. ' +
       'Calibrate again continues from them; Reset and calibrate discards them. Offsets only for now: the full 9-parameter fit follows.';
   } else if (saved) {
@@ -669,6 +675,7 @@ $('cal-fresh').onclick = () => {
   }
 };
 $('cal-stop').onclick = () => calPost('/api/cal/stop');
+$('cal-accept').onclick = () => calPost('/api/cal/accept');
 
 for (const input of document.querySelectorAll('input[name=plotview]')) {
   input.onchange = () => setMode(input.value);

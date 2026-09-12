@@ -30,10 +30,11 @@ typedef enum {
 // b = matrix · (m − offset), in µT.
 typedef struct {
     bool valid;
+    bool rough;       // accepted below the quality bar: usable, but say so
     float offset[3];
     float matrix[9];  // row-major
     float radius;     // µT
-    float fit_rms;    // RMS of |b|/radius − 1
+    float fit_rms;    // RMS of |b|/radius − 1 over the readings the fit kept
     uint16_t points;
 } mag_cal_params_t;
 
@@ -47,6 +48,7 @@ typedef struct {
     float centre[3];            // current centre estimate
     uint16_t points;            // readings in the buffer
     mag_cal_params_t params;    // the calibration in use
+    bool can_accept;            // the fit is usable now, though below the quality bar
     bool have_fit;              // whether fit holds a result yet
     mag_fit_t fit;              // the latest fit, for showing how it's going
     uint32_t fit_ms;            // what that fit cost
@@ -62,6 +64,10 @@ esp_err_t mag_cal_begin(bool fresh);
 
 // Interrupts a running session.
 void mag_cal_stop(void);
+
+// Saves the current fit even though it hasn't met the quality bar, as long as
+// it is usable (see ROUGH_* in the source). ESP_ERR_INVALID_STATE if it isn't.
+esp_err_t mag_cal_accept(void);
 
 void mag_cal_get_status(mag_cal_status_t *out);
 

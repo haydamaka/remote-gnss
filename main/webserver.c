@@ -360,6 +360,7 @@ static esp_err_t cal_get(httpd_req_t *req)
     json_str(&j, "state", STATES[s.state]);
     json_str(&j, "reason", s.reason[0] ? s.reason : NULL);
     json_str(&j, "blocking", s.blocking[0] ? s.blocking : NULL);
+    json_bool(&j, "can_accept", s.can_accept);
     json_num(&j, "progress", s.progress, 3);
     json_num(&j, "coverage", s.coverage, 3);
     json_key(&j, "missing");
@@ -378,6 +379,7 @@ static esp_err_t cal_get(httpd_req_t *req)
         json_floats(&j, "matrix", s.params.matrix, 9, 4);
         json_num(&j, "radius", s.params.radius, 2);
         json_num(&j, "rms", s.params.fit_rms, 4);
+        json_bool(&j, "rough", s.params.rough);
         json_int(&j, "points", s.params.points);
         json_close(&j);
     } else {
@@ -415,6 +417,15 @@ static esp_err_t cal_start_post(httpd_req_t *req)
                  httpd_query_key_value(query, "fresh", value, sizeof(value)) == ESP_OK && value[0] == '1';
     if (mag_cal_begin(fresh) != ESP_OK) {
         return reply(req, HTTPD_400, "No magnetometer detected");
+    }
+    return reply(req, HTTPD_200, NULL);
+}
+
+// Saves a fit that is usable but below the quality bar, labelled as rough.
+static esp_err_t cal_accept_post(httpd_req_t *req)
+{
+    if (mag_cal_accept() != ESP_OK) {
+        return reply(req, HTTPD_400, "The fit isn't good enough to save yet");
     }
     return reply(req, HTTPD_200, NULL);
 }
@@ -541,6 +552,7 @@ esp_err_t webserver_start(void)
         {.uri = "/api/cal", .method = HTTP_GET, .handler = cal_get},
         {.uri = "/api/cal/start", .method = HTTP_POST, .handler = cal_start_post},
         {.uri = "/api/cal/stop", .method = HTTP_POST, .handler = cal_stop_post},
+        {.uri = "/api/cal/accept", .method = HTTP_POST, .handler = cal_accept_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
         {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},

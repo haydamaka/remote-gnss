@@ -18,7 +18,7 @@
 _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer readings than the buffer holds");
 
 #define NVS_NAMESPACE "magcal"
-#define NVS_VERSION 1
+#define NVS_VERSION 2  // 2 added the rough flag
 #define TASK_PERIOD_MS 100
 #define REFIT_AFTER 20                // new readings before fitting again
 #define FIT_EVERY_US (3 * 1000000LL)  // and no sooner: a fit costs a good fraction of a second
@@ -38,6 +38,11 @@ _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer re
 #define RADIUS_MIN 20.0f
 #define RADIUS_MAX 70.0f
 #define ACCEPT_RMS 0.025f
+// A rough calibration: the readings it kept sit on the ellipsoid, and it kept
+// enough of them. Trimming barely moves the parameters (CALIBRATION.md §9), so
+// this is still a usable calibration — it is only labelled as rough.
+#define ROUGH_RMS 0.06f
+#define ROUGH_INLIERS 0.7f
 #define ACCEPT_WOBBLE 0.02f
 #define ACCEPT_SCATTER 0.2f
 #define ACCEPT_INLIERS 0.9f
@@ -58,6 +63,7 @@ typedef struct {
 
 typedef struct {
     uint8_t version;
+    uint8_t rough;
     float offset[3];
     float matrix[9];
     float radius;
@@ -239,8 +245,11 @@ static void update_progress(void)
 
 // Which criterion of §2 is not met yet, or NULL when the fit may be accepted.
 // The text lands in the failure message, so it says the value and the limit.
-static const char *unmet(char *buf, size_t size)
+// With rough set, the error and inlier limits are the looser ROUGH_* ones.
+static const char *unmet_at(bool rough, char *buf, size_t size)
 {
+    float rms_limit = rough ? ROUGH_RMS : ACCEPT_RMS;
+    float inlier_limit = rough ? ROUGH_INLIERS : ACCEPT_INLIERS;
     if (!have_fit) {
         return "no fit yet";
     }
@@ -258,8 +267,8 @@ static const char *unmet(char *buf, size_t size)
                  (double)EIG_MAX);
         return buf;
     }
-    if (fit.rms > ACCEPT_RMS) {
-        snprintf(buf, size, "fit error %.1f %% (limit %.1f %%)", fit.rms * 100, (double)ACCEPT_RMS * 100);
+    if (fit.rms > rms_limit) {
+        snprintf(buf, size, "fit error %.1f %% (limit %.1f %%)", fit.rms * 100, rms_limit * 100);
         return buf;
     }
     if (fit.wobble > ACCEPT_WOBBLE) {
@@ -270,7 +279,7 @@ static const char *unmet(char *buf, size_t size)
         snprintf(buf, size, "readings too flat (spread %.2f, want %.2f)", fit.scatter, (double)ACCEPT_SCATTER);
         return buf;
     }
-    if (fit.inliers < fit.points * ACCEPT_INLIERS) {
+    if (fit.inliers < fit.points * inlier_limit) {
         snprintf(buf, size, "only %u of %u readings fit", fit.inliers, fit.points);
         return buf;
     }
@@ -278,6 +287,18 @@ static const char *unmet(char *buf, size_t size)
         return "still settling";
     }
     return NULL;
+}
+
+static const char *unmet(char *buf, size_t size)
+{
+    return unmet_at(false, buf, size);
+}
+
+// Whether the fit could be saved as a rough calibration right now.
+static bool acceptable_rough(void)
+{
+    char scratch[sizeof(reason_buf)];
+    return unmet_at(true, scratch, sizeof(scratch)) == NULL;
 }
 
 static bool settled(const mag_fit_t *a, const mag_fit_t *b)
@@ -335,7 +356,7 @@ static void fail(const char *text)
 static void flush_nvs(void)
 {
     static int16_t packed[MAG_CAL_MAX_POINTS][3];  // 0.1 µT units
-    stored_params_t sp = {.version = NVS_VERSION};
+    stored_params_t sp = {.version = NVS_VERSION, .rough = params.rough};
     uint16_t n;
     bool write_params;
 
@@ -397,14 +418,16 @@ static void load(void)
     esp_err_t err = nvs_get_blob(nvs, "params", &sp, &len);
     if (err == ESP_OK && len == sizeof(sp) && sp.version == NVS_VERSION) {
         params.valid = true;
+        params.rough = sp.rough;
         memcpy(params.offset, sp.offset, sizeof(params.offset));
         memcpy(params.matrix, sp.matrix, sizeof(params.matrix));
         params.radius = sp.radius;
         params.fit_rms = sp.fit_rms;
         params.points = sp.points;
         memcpy(centre, sp.offset, sizeof(centre));
-        ESP_LOGI(TAG, "calibration: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.1f %%", params.offset[0],
-                 params.offset[1], params.offset[2], params.radius, params.fit_rms * 100);
+        ESP_LOGI(TAG, "calibration%s: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.1f %%",
+                 params.rough ? " (rough)" : "", params.offset[0], params.offset[1], params.offset[2],
+                 params.radius, params.fit_rms * 100);
     } else if (err == ESP_OK) {
         ESP_LOGW(TAG, "saved calibration from another version; ignored");
     }
@@ -432,10 +455,11 @@ static void load(void)
 }
 
 // With the lock held.
-static void finish(void)
+static void finish(bool rough)
 {
     params_before_save = params;
     params.valid = true;
+    params.rough = rough;
     memcpy(params.offset, fit.offset, sizeof(params.offset));
     memcpy(params.matrix, fit.matrix, sizeof(params.matrix));
     params.radius = fit.radius;
@@ -443,8 +467,9 @@ static void finish(void)
     params.points = npoints;
     state = MAG_CAL_DONE;
     params_dirty = points_dirty = true;  // written by flush_nvs(), outside the lock
-    ESP_LOGI(TAG, "saved: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.2f %%, level %u, %u readings",
-             fit.offset[0], fit.offset[1], fit.offset[2], fit.radius, fit.rms * 100, fit.level, npoints);
+    ESP_LOGI(TAG, "saved%s: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.2f %%, level %u, %u readings",
+             rough ? " (rough)" : "", fit.offset[0], fit.offset[1], fit.offset[2], fit.radius, fit.rms * 100,
+             fit.level, npoints);
 }
 
 // A fit costs a good fraction of a second on this chip, so it runs on a copy
@@ -497,12 +522,18 @@ static void run_fit(void)
         }
         strlcpy(blocking_buf, missing_criterion ? missing_criterion : "", sizeof(blocking_buf));
         if (!missing_criterion && session_new >= SESSION_MIN_NEW) {
-            finish();
+            finish(false);
         } else if (esp_timer_get_time() - session_start > SESSION_TIMEOUT_US) {
-            char text[sizeof(reason_buf)];
-            snprintf(text, sizeof(text), "Gave up after 5 minutes: %s",
-                     missing_criterion ? missing_criterion : "too few new readings");
-            fail(text);
+            // Rather than throw away five minutes of turning, keep what is usable.
+            if (session_new >= SESSION_MIN_NEW && acceptable_rough()) {
+                finish(true);
+                ESP_LOGW(TAG, "quality bar not met (%s), saved as rough", missing_criterion);
+            } else {
+                char text[sizeof(reason_buf)];
+                snprintf(text, sizeof(text), "Gave up after 5 minutes: %s",
+                         missing_criterion ? missing_criterion : "too few new readings");
+                fail(text);
+            }
         }
     }
     xSemaphoreGive(lock);
@@ -607,11 +638,24 @@ void mag_cal_stop(void)
     xSemaphoreGive(lock);
 }
 
+esp_err_t mag_cal_accept(void)
+{
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (state == MAG_CAL_RUNNING && acceptable_rough()) {
+        finish(true);
+        err = ESP_OK;
+    }
+    xSemaphoreGive(lock);
+    return err;
+}
+
 void mag_cal_get_status(mag_cal_status_t *out)
 {
     xSemaphoreTake(lock, portMAX_DELAY);
     *out = (mag_cal_status_t){
         .state = state,
+        .can_accept = state == MAG_CAL_RUNNING && acceptable_rough(),
         .progress = progress,
         .coverage = coverage,
         .missing = missing,
