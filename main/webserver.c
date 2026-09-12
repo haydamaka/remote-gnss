@@ -602,13 +602,6 @@ static esp_err_t forget_post(httpd_req_t *req)
 
 esp_err_t webserver_start(void)
 {
-    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
-    cfg.server_port = CONFIG_RGNSS_HTTP_PORT;
-    cfg.stack_size = 6144;
-    cfg.lru_purge_enable = true;
-    cfg.max_uri_handlers = 12;
-    ESP_RETURN_ON_ERROR(httpd_start(&server, &cfg), TAG, "start");
-
     static const httpd_uri_t uris[] = {
         {.uri = "/", .method = HTTP_GET, .handler = index_get},
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
