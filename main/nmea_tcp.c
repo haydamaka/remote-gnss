@@ -17,9 +17,12 @@
 // after the last one that was appended.
 #define OUT_SIZE 512
 
-// A client that can't take data for this long is treated as gone. It is far
-// longer than any transient stall and far shorter than the keepalive probe.
-#define SEND_TIMEOUT_S 5
+// How long one send may take before the batch is given up on. A client this
+// slow loses sentences and keeps its connection: the link being busy is not
+// the same as the client being gone, and every socket stalls together when
+// lwip runs short of buffers. A peer that really has vanished is reaped by
+// the keepalive below instead.
+#define SEND_TIMEOUT_S 2
 
 // A listener that only reads sends nothing back, so a client that vanished
 // without a FIN (a phone out of range) is invisible until TCP probes for it.
@@ -35,6 +38,7 @@ typedef struct {
     nmea_sub_t sub;
     char peer[24];
     int64_t connected_us;
+    uint32_t stalled;  // batches lost because the link was busy
 } client_t;
 
 static client_t clients[CONFIG_RGNSS_TCP_MAX_CLIENTS];
@@ -57,7 +61,13 @@ static void configure_socket(int sock)
     setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 }
 
-static bool send_all(int sock, const char *buf, size_t len)
+typedef enum {
+    SEND_OK,
+    SEND_STALLED,  // nothing went out before the timeout; the batch is lost
+    SEND_FAILED,   // the socket is broken, or a batch went out half-written
+} send_result_t;
+
+static send_result_t send_all(int sock, const char *buf, size_t len)
 {
     size_t sent = 0;
     while (sent < len) {
@@ -66,11 +76,16 @@ static bool send_all(int sock, const char *buf, size_t len)
             if (errno == EINTR) {
                 continue;
             }
-            return false;  // includes the send timeout: a client this slow is dropped
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                // Half a batch is half a sentence, and the client has no way
+                // to resynchronise, so only an untouched batch can be dropped.
+                return sent == 0 ? SEND_STALLED : SEND_FAILED;
+            }
+            return SEND_FAILED;
         }
         sent += (size_t)n;
     }
-    return true;
+    return SEND_OK;
 }
 
 // True when the peer has closed. Anything the client sends is discarded for
@@ -120,8 +135,18 @@ static void client_task(void *arg)
             }
             n = nmea_sub_receive(c->sub, sentence, sizeof(sentence), 0);
         }
-        if (used > 0 && !send_all(c->sock, out, used)) {
-            break;
+        if (used > 0) {
+            send_result_t sent = send_all(c->sock, out, used);
+            if (sent == SEND_FAILED) {
+                break;
+            }
+            if (sent == SEND_STALLED) {
+                // Count it and move on; the sentences in this batch are gone.
+                if (c->stalled++ % 50 == 0) {
+                    ESP_LOGW(TAG, "%s is not keeping up (%lu batches lost)", c->peer,
+                             (unsigned long)c->stalled);
+                }
+            }
         }
         if (peer_closed(c->sock)) {
             break;
@@ -157,6 +182,7 @@ static bool start_client(int sock, const struct sockaddr_in *addr)
     snprintf(c->peer, sizeof(c->peer), "%s:%u", ip, ntohs(addr->sin_port));
     c->sock = sock;
     c->connected_us = esp_timer_get_time();
+    c->stalled = 0;
 
     c->sub = nmea_hub_subscribe(c->peer);
     if (c->sub == NULL) {
@@ -254,6 +280,7 @@ size_t nmea_tcp_clients(nmea_tcp_client_t *out, size_t max)
         out[n].sentences = stats.sentences;
         out[n].bytes = stats.bytes;
         out[n].dropped = stats.dropped;
+        out[n].stalled = clients[i].stalled;
         out[n].connected_us = clients[i].connected_us;
         n++;
     }

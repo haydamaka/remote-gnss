@@ -15,6 +15,7 @@ typedef struct {
     uint32_t sentences;
     uint32_t bytes;
     uint32_t dropped;
+    uint32_t stalled;      // batches lost because the link couldn't take them
     int64_t connected_us;  // esp_timer time the client arrived
 } nmea_tcp_client_t;
 

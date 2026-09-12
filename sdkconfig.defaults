@@ -13,3 +13,9 @@ CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
 CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
 CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=247
+
+# Several NMEA clients at once plus the web server exhausted lwip's send
+# buffers, which stalled every socket together. Each client is a ~2 KB/s
+# trickle, so a smaller buffer per socket costs nothing and leaves room.
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=2880
+CONFIG_LWIP_TCP_WND_DEFAULT=2880

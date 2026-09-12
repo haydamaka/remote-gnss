@@ -37,9 +37,37 @@ esp_err_t nmea_hub_init(void)
     return lock != NULL ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
+// True when the sentence's three-character type is one the outputs asked for.
+// The talker (GP, GN, GA, GB, ...) is deliberately not matched: a client wants
+// GGA whichever constellation produced it.
+static bool wanted(const char *sentence, size_t len)
+{
+    static const char types[] = CONFIG_RGNSS_NMEA_TYPES;
+    if (types[0] == '\0') {
+        return true;
+    }
+    if (len < 6) {
+        return false;
+    }
+    for (const char *p = types; *p != '\0';) {
+        if (strncmp(p, sentence + 3, 3) == 0 && (p[3] == ',' || p[3] == '\0')) {
+            return true;
+        }
+        const char *comma = strchr(p, ',');
+        if (comma == NULL) {
+            break;
+        }
+        p = comma + 1;
+    }
+    return false;
+}
+
 void nmea_hub_publish(const char *sentence, size_t len)
 {
     if (len == 0 || len > NMEA_HUB_MAX_SENTENCE || lock == NULL) {
+        return;
+    }
+    if (!wanted(sentence, len)) {
         return;
     }
     // Zero timeout: the GNSS task must not wait on a subscriber coming or
