@@ -142,11 +142,26 @@ the web server's. The first version treated a stalled send as a dead client and
 disconnected it, which was the wrong response to a busy link; it now loses the
 batch and keeps the connection.
 
-**Coexistence is the open problem.** The C3 has one radio. With BLE connected,
-the WiFi station fails to hold its link to a −77 dBm access point, and the
-firmware's 30-second fallback brings up the soft AP instead. The first suspects
-are WiFi power save (`wifi:pm start, type: 1`) and the BLE connection interval;
-neither has been tried yet.
+**Coexistence: mostly solved, and the rest is a deliberate trade-off.** The C3
+has one radio, and NimBLE's defaults assume it has nothing else to do with it.
+Advertising every 30–60 ms and a connection event every 15 ms starved the
+station so thoroughly that it could not finish a WPA2 handshake with a −77 dBm
+access point. Advertising at 500 ms–1 s, a connection interval of 60–120 ms,
+WiFi power save off and the coexistence preference set to WiFi — all only when
+BLE is in use — let the station associate and the web page answer, and cost BLE
+nothing: 34 sentences/s with no errors, against 4.7 before.
+
+What remains: association takes about 25 s and several retries, and an active
+BLE connection still displaces the station. **That last part is accepted** — a
+client that wants BLE gives up WiFi for as long as it holds the link. What is
+not yet good enough is that the station should be dependable whenever BLE is
+*idle*, so the device stays configurable; today it comes back but flakily.
+
+The design that would settle it is to make BLE opt-in at run time rather than
+always advertising: a switch on the Outputs tab (phase 4), saved in NVS, so
+WiFi is untouched until someone deliberately chooses BLE. The signal itself is
+the other half — −77 dBm leaves coexistence no margin, and this is worth
+re-measuring next to the access point before tuning anything further.
 
 ## 4. Client software
 
