@@ -101,12 +101,62 @@ static mag_fit_t fit;
 static bool have_fit;
 static int stable_count;
 static uint32_t fit_ms;
+// The working memory a fit needs: about 17 kB that only matters while a session
+// is running. It is the one dynamic allocation in the firmware, and it is
+// bounded at a single block - scratch_acquire() hands back what already exists
+// rather than taking more, so the total can never exceed one no matter which
+// path runs. Release is driven by the invariant below rather than paired with
+// each of the four ways a session can end, so a fifth cannot leak.
+typedef struct {
+    mag_fit_scratch_t fit;
+    float snapshot[MAG_CAL_MAX_POINTS][3];
+    float kept[MAG_CAL_MAX_POINTS][3];
+    bool  keep[MAG_CAL_MAX_POINTS];
+} mag_scratch_t;
+
+static mag_scratch_t *scratch;
+static uint32_t heap_at_acquire;
+
+// Staging for the NVS blob, 0.1 µT units. One copy, shared by save and load.
+static int16_t packed[MAG_CAL_MAX_POINTS][3];
+
 static bool points_dirty;
 static uint32_t points_seq;  // bumped whenever the buffer changes, so the page can tell
 static bool params_dirty;
 static bool started;
 static bool fit_once;  // fit even without a session: readings were just loaded
 static TaskHandle_t task;
+
+// Call with the lock held.
+static mag_scratch_t *scratch_acquire(void)
+{
+    if (scratch) {
+        return scratch;  // never a second block, whatever called us
+    }
+    heap_at_acquire = esp_get_free_heap_size();
+    scratch = malloc(sizeof *scratch);
+    if (!scratch) {
+        ESP_LOGW(TAG, "no room for %u bytes of fit scratch; %u bytes of heap free",
+                 (unsigned)sizeof *scratch, (unsigned)heap_at_acquire);
+    }
+    return scratch;
+}
+
+// Call with the lock held. Reports the heap back, so a leak is a number in the
+// log rather than something to be reasoned about.
+static void scratch_release(void)
+{
+    if (!scratch) {
+        return;
+    }
+    free(scratch);
+    scratch = NULL;
+    uint32_t now = esp_get_free_heap_size();
+    if (now + 512 < heap_at_acquire) {
+        ESP_LOGW(TAG, "heap did not come back: %u free, %u before the session",
+                 (unsigned)now, (unsigned)heap_at_acquire);
+    }
+}
 
 // The readings changed: they need saving, and anyone drawing them needs to
 // know. Every site that alters the buffer goes through here.
@@ -428,7 +478,8 @@ static void fail(const char *text)
 // commit takes tens of milliseconds and would stall every HTTP request.
 static void flush_nvs(void)
 {
-    static int16_t packed[MAG_CAL_MAX_POINTS][3];  // 0.1 µT units
+    // packed[] is shared with the loader: saving runs on the calibration task,
+    // loading only at start-up, so the two never overlap.
     stored_params_t sp = {.version = NVS_VERSION, .quality = params.quality};
     uint16_t n;
     bool write_params;
@@ -480,7 +531,6 @@ static void flush_nvs(void)
 
 static void load(void)
 {
-    static int16_t packed[MAG_CAL_MAX_POINTS][3];
     nvs_handle_t nvs;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
         ESP_LOGI(TAG, "nothing saved");
@@ -578,7 +628,7 @@ static void finish(mag_cal_quality_t quality)
 // inventing a nicer-looking number.
 static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t *fit_io)
 {
-    static float kept[MAG_CAL_MAX_POINTS][3];
+    float (*kept)[3] = scratch->kept;
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
         if (keep[i]) {
@@ -589,7 +639,7 @@ static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t
         return false;
     }
     mag_fit_t tidy;
-    if (!mag_fit(kept, k, 0.0f, fit_io, &tidy, NULL) || tidy.rms > fit_io->rms * 0.9f ||
+    if (!mag_fit(kept, k, 0.0f, fit_io, &tidy, NULL, &scratch->fit) || tidy.rms > fit_io->rms * 0.9f ||
         dist(tidy.offset, fit_io->offset) > TIDY_MAX_SHIFT_UT) {
         return false;
     }
@@ -599,8 +649,6 @@ static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t
 
 static void run_fit(void)
 {
-    static float snapshot[MAG_CAL_MAX_POINTS][3];
-    static bool keep[MAG_CAL_MAX_POINTS];
     mag_fit_t start;
     mag_fit_t result;
     bool have_start;
@@ -608,6 +656,12 @@ static void run_fit(void)
     size_t n;
 
     xSemaphoreTake(lock, portMAX_DELAY);
+    if (!scratch_acquire()) {
+        xSemaphoreGive(lock);
+        return;  // nothing to fit with; the session keeps collecting readings
+    }
+    float (*snapshot)[3] = scratch->snapshot;
+    bool *keep = scratch->keep;
     n = npoints;
     for (size_t i = 0; i < n; i++) {
         memcpy(snapshot[i], points[i].v, sizeof(snapshot[i]));
@@ -619,7 +673,7 @@ static void run_fit(void)
     xSemaphoreGive(lock);
 
     int64_t began = esp_timer_get_time();
-    bool ok = mag_fit(snapshot, n, 0.0f, have_start ? &start : NULL, &result, keep);
+    bool ok = mag_fit(snapshot, n, 0.0f, have_start ? &start : NULL, &result, keep, &scratch->fit);
     bool tidied = ok && tidy_up(snapshot, n, keep, &result);
     uint32_t took = (uint32_t)((esp_timer_get_time() - began) / 1000);
 
@@ -681,6 +735,12 @@ static void cal_task(void *arg)
         xSemaphoreTake(lock, portMAX_DELAY);
         if (state != MAG_CAL_RUNNING) {
             fresh = 0;
+            // Nothing is calibrating, so nothing owns the fit scratch. Checked
+            // here rather than paired with each way a session can end, so that
+            // adding another way out cannot leak it.
+            if (scratch && !fit_once) {
+                scratch_release();
+            }
         }
         for (size_t i = 0; i < n; i++) {
             since = batch[i].seq;
@@ -729,6 +789,10 @@ esp_err_t mag_cal_begin(bool fresh)
     ESP_RETURN_ON_FALSE(started, ESP_ERR_INVALID_STATE, TAG, "calibration task not running");
     ESP_RETURN_ON_FALSE(magnetometer_ut_per_count() > 0, ESP_ERR_INVALID_STATE, TAG, "no magnetometer");
     xSemaphoreTake(lock, portMAX_DELAY);
+    if (!scratch_acquire()) {
+        xSemaphoreGive(lock);
+        return ESP_ERR_NO_MEM;  // say so now, not silently three seconds later
+    }
     if (fresh) {
         npoints = 0;
         arrivals = 0;

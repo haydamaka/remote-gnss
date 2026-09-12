@@ -34,20 +34,13 @@ typedef struct {
     uint8_t level;
 } model_t;
 
-// Scratch. Static, not on the stack: the calibration task has a small one, and
-// only one fit runs at a time.
+// Scratch. Not on the stack: the calibration task has a small one. It belongs
+// to the caller now, and is reached through this pointer for the duration of
+// one fit - only one runs at a time, so a file-static is enough and no inner
+// function needs to carry it.
 static const float (*g_pts)[3];
-static uint16_t g_idx[MAG_FIT_MAX_POINTS];  // the finite readings, into the caller's array
 static int g_n;
-
-static float s_res[MAG_FIT_MAX_POINTS];
-static float s_sort[MAG_FIT_MAX_POINTS];
-static uint8_t s_mask[MAG_FIT_MAX_POINTS];
-static uint8_t s_best[MAG_FIT_MAX_POINTS];
-static uint8_t s_tmp[MAG_FIT_MAX_POINTS];
-static double s_a[9][10];
-static uint8_t s_cell_n[N_CELLS];
-static float s_cell_v[N_CELLS][3];
+static mag_fit_scratch_t *SC;
 static uint32_t s_rng = 1u;  // fixed seed: the same readings must give the same fit
 
 #ifdef COUNTING
@@ -61,7 +54,7 @@ static unsigned long cnt_res, cnt_normal, cnt_solve, cnt_lvl[3];
 
 static const float *pt(int i)
 {
-    return g_pts[g_idx[i]];
+    return g_pts[SC->idx[i]];
 }
 
 static uint32_t rnd(void)
@@ -164,7 +157,7 @@ static void residuals_all(const model_t *m, float *out)
     }
 }
 
-// Solves an n x n system in s_a (augmented) by Gaussian elimination with partial
+// Solves an n x n system in SC->a (augmented) by Gaussian elimination with partial
 // pivoting. False if singular.
 static bool solve(int n, double *x)
 {
@@ -172,36 +165,36 @@ static bool solve(int n, double *x)
     for (int col = 0; col < n; col++) {
         int piv = col;
         for (int r = col + 1; r < n; r++) {
-            if (fabs(s_a[r][col]) > fabs(s_a[piv][col])) {
+            if (fabs(SC->a[r][col]) > fabs(SC->a[piv][col])) {
                 piv = r;
             }
         }
-        if (!(fabs(s_a[piv][col]) > 1e-14)) {
+        if (!(fabs(SC->a[piv][col]) > 1e-14)) {
             return false;
         }
         if (piv != col) {
             for (int k = col; k <= n; k++) {
-                double t = s_a[col][k];
-                s_a[col][k] = s_a[piv][k];
-                s_a[piv][k] = t;
+                double t = SC->a[col][k];
+                SC->a[col][k] = SC->a[piv][k];
+                SC->a[piv][k] = t;
             }
         }
         for (int r = col + 1; r < n; r++) {
-            double f = s_a[r][col] / s_a[col][col];
+            double f = SC->a[r][col] / SC->a[col][col];
             if (f == 0.0) {
                 continue;
             }
             for (int k = col; k <= n; k++) {
-                s_a[r][k] -= f * s_a[col][k];
+                SC->a[r][k] -= f * SC->a[col][k];
             }
         }
     }
     for (int i = n - 1; i >= 0; i--) {
-        double acc = s_a[i][n];
+        double acc = SC->a[i][n];
         for (int k = i + 1; k < n; k++) {
-            acc -= s_a[i][k] * x[k];
+            acc -= SC->a[i][k] * x[k];
         }
-        x[i] = acc / s_a[i][i];
+        x[i] = acc / SC->a[i][i];
     }
     for (int i = 0; i < n; i++) {
         if (!isfinite(x[i])) {
@@ -266,12 +259,12 @@ static float median_of(float *a, int n)
 // rejecting honest readings.
 static int gate_inliers(const float *res, float noise_rel, uint8_t *mask, float *gate_out)
 {
-    memcpy(s_sort, res, (size_t)g_n * sizeof(float));
-    float med = median_of(s_sort, g_n);
+    memcpy(SC->sort, res, (size_t)g_n * sizeof(float));
+    float med = median_of(SC->sort, g_n);
     for (int i = 0; i < g_n; i++) {
-        s_sort[i] = fabsf(res[i] - med);
+        SC->sort[i] = fabsf(res[i] - med);
     }
-    float spread = 1.4826f * median_of(s_sort, g_n);
+    float spread = 1.4826f * median_of(SC->sort, g_n);
     float gate = GATE_SIGMAS * (spread > noise_rel ? spread : noise_rel);
     int count = 0;
     for (int i = 0; i < g_n; i++) {
@@ -307,7 +300,7 @@ static bool kasa(const uint8_t *mask, model_t *out)
     for (int k = 0; k < 3; k++) {
         mean[k] /= n;
     }
-    memset(s_a, 0, sizeof(s_a));
+    memset(SC->a, 0, sizeof(SC->a));
     for (int i = 0; i < g_n; i++) {
         if (mask && !mask[i]) {
             continue;
@@ -320,9 +313,9 @@ static bool kasa(const uint8_t *mask, model_t *out)
         double y = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
         for (int a = 0; a < 4; a++) {
             for (int b = 0; b < 4; b++) {
-                s_a[a][b] += row[a] * row[b];
+                SC->a[a][b] += row[a] * row[b];
             }
-            s_a[a][4] += row[a] * y;
+            SC->a[a][4] += row[a] * y;
         }
     }
     double sol[4];
@@ -354,16 +347,16 @@ static bool ransac(model_t *out)
         return false;
     }
     for (int trial = 0; trial < RANSAC_TRIALS; trial++) {
-        memset(s_tmp, 0, (size_t)g_n);
+        memset(SC->tmp, 0, (size_t)g_n);
         for (int k = 0; k < 4; k++) {  // four distinct readings
             int pick = (int)(rnd() % (uint32_t)g_n);
-            for (int guard = 0; s_tmp[pick] && guard < g_n; guard++) {
+            for (int guard = 0; SC->tmp[pick] && guard < g_n; guard++) {
                 pick = (pick + 1) % g_n;
             }
-            s_tmp[pick] = 1;
+            SC->tmp[pick] = 1;
         }
         model_t cand;
-        if (!kasa(s_tmp, &cand)) {
+        if (!kasa(SC->tmp, &cand)) {
             continue;
         }
         float r = model_radius(&cand);
@@ -384,10 +377,10 @@ static bool ransac(model_t *out)
         return false;
     }
     for (int i = 0; i < g_n; i++) {  // refit on everything that agreed
-        s_tmp[i] = fabsf(residual_of(&best, pt(i))) < RANSAC_TOLERANCE;
+        SC->tmp[i] = fabsf(residual_of(&best, pt(i))) < RANSAC_TOLERANCE;
     }
     model_t refined;
-    *out = kasa(s_tmp, &refined) ? refined : best;
+    *out = kasa(SC->tmp, &refined) ? refined : best;
     return true;
 }
 
@@ -447,7 +440,7 @@ static double lm_step_setup(const double p[9], uint8_t level, const uint8_t *mas
     unpack(p, level, &m);
     int np = param_count(level);
     if (normal) {
-        memset(s_a, 0, sizeof(s_a));
+        memset(SC->a, 0, sizeof(SC->a));
     }
     double cost = 0.0;
     for (int i = 0; i < g_n; i++) {
@@ -489,15 +482,15 @@ static double lm_step_setup(const double p[9], uint8_t level, const uint8_t *mas
         }
         for (int a = 0; a < np; a++) {
             for (int b = a; b < np; b++) {
-                s_a[a][b] += j[a] * j[b];
+                SC->a[a][b] += j[a] * j[b];
             }
-            s_a[a][np] -= j[a] * r;  // right-hand side is -Jt r, in the column solve() reads
+            SC->a[a][np] -= j[a] * r;  // right-hand side is -Jt r, in the column solve() reads
         }
     }
     if (normal) {
         for (int a = 0; a < np; a++) {
             for (int b = 0; b < a; b++) {
-                s_a[a][b] = s_a[b][a];
+                SC->a[a][b] = SC->a[b][a];
             }
         }
     }
@@ -522,10 +515,10 @@ static bool lm_fit(const model_t *start, const uint8_t *mask, uint8_t level, mod
     for (int it = 0; it < LM_ITERATIONS; it++) {
         lm_step_setup(p, level, mask, true);
         for (int a = 0; a < np; a++) {
-            diag[a] = s_a[a][a] + 1e-12;
+            diag[a] = SC->a[a][a] + 1e-12;
         }
         for (int a = 0; a < np; a++) {
-            s_a[a][a] += lambda * diag[a];
+            SC->a[a][a] += lambda * diag[a];
         }
         if (!solve(np, step)) {
             lambda *= 10.0;
@@ -600,8 +593,8 @@ static bool direction_of(const model_t *m, const float p[3], float u[3])
 static void coverage(const model_t *m, const uint8_t *mask, int *cells, int caps[6],
                      float *scatter, float *wobble)
 {
-    memset(s_cell_n, 0, sizeof(s_cell_n));
-    memset(s_cell_v, 0, sizeof(s_cell_v));
+    memset(SC->cell_n, 0, sizeof(SC->cell_n));
+    memset(SC->cell_v, 0, sizeof(SC->cell_v));
     float scat[6] = {0, 0, 0, 0, 0, 0};
     int n = 0;
     for (int k = 0; k < 6; k++) {
@@ -614,9 +607,9 @@ static void coverage(const model_t *m, const uint8_t *mask, int *cells, int caps
         }
         uint8_t c = mag_fit_cell(u);
         float r = residual_of(m, pt(i));
-        s_cell_n[c]++;
+        SC->cell_n[c]++;
         for (int k = 0; k < 3; k++) {
-            s_cell_v[c][k] += r * u[k];
+            SC->cell_v[c][k] += r * u[k];
         }
         for (int k = 0; k < 3; k++) {
             caps[2 * k] += u[k] >= CAP_COS;
@@ -633,12 +626,12 @@ static void coverage(const model_t *m, const uint8_t *mask, int *cells, int caps
     int occupied = 0;
     float total[3] = {0, 0, 0};
     for (int c = 0; c < N_CELLS; c++) {
-        if (!s_cell_n[c]) {
+        if (!SC->cell_n[c]) {
             continue;
         }
         occupied++;
         for (int k = 0; k < 3; k++) {
-            total[k] += s_cell_v[c][k] / s_cell_n[c];
+            total[k] += SC->cell_v[c][k] / SC->cell_n[c];
         }
     }
     *cells = occupied;
@@ -690,12 +683,12 @@ static bool robust_fit(const model_t *start, uint8_t level, float noise_ut, mode
         if (!isfinite(radius) || radius <= 0.0f) {
             return false;
         }
-        residuals_all(&model, s_res);
-        int count = gate_inliers(s_res, noise_ut / radius, s_tmp, NULL);
-        if (have_mask && memcmp(s_tmp, mask, (size_t)g_n) == 0) {
+        residuals_all(&model, SC->res);
+        int count = gate_inliers(SC->res, noise_ut / radius, SC->tmp, NULL);
+        if (have_mask && memcmp(SC->tmp, mask, (size_t)g_n) == 0) {
             break;
         }
-        memcpy(mask, s_tmp, (size_t)g_n);
+        memcpy(mask, SC->tmp, (size_t)g_n);
         have_mask = true;
         if (count < MIN_FIT_INLIERS) {
             return false;
@@ -710,8 +703,8 @@ static bool robust_fit(const model_t *start, uint8_t level, float noise_ut, mode
     if (!isfinite(radius) || radius <= 0.0f) {
         return false;
     }
-    residuals_all(&model, s_res);
-    *inliers = gate_inliers(s_res, noise_ut / radius, mask, NULL);
+    residuals_all(&model, SC->res);
+    *inliers = gate_inliers(SC->res, noise_ut / radius, mask, NULL);
     *out = model;
     return true;
 }
@@ -724,11 +717,11 @@ static bool fit_from(const model_t *start, float noise_ut, model_t *out, uint8_t
     if (!isfinite(radius) || radius <= 0.0f) {
         return false;
     }
-    residuals_all(start, s_res);
-    int count = gate_inliers(s_res, noise_ut / radius, s_tmp, NULL);
+    residuals_all(start, SC->res);
+    int count = gate_inliers(SC->res, noise_ut / radius, SC->tmp, NULL);
     int cells, caps[6];
     float scatter, wob;
-    coverage(start, s_tmp, &cells, caps, &scatter, &wob);
+    coverage(start, SC->tmp, &cells, caps, &scatter, &wob);
     int level = choose_level(cells, caps, scatter, count);
 
     bool ok = false;
@@ -743,11 +736,11 @@ static bool fit_from(const model_t *start, float noise_ut, model_t *out, uint8_t
     if (higher > out->level) {
         model_t better;
         int better_inliers;
-        if (robust_fit(out, higher, noise_ut, &better, s_tmp, &better_inliers)
+        if (robust_fit(out, higher, noise_ut, &better, SC->tmp, &better_inliers)
             && better_inliers >= (int)(0.98f * *inliers)) {
             *out = better;
             *inliers = better_inliers;
-            memcpy(mask, s_tmp, (size_t)g_n);
+            memcpy(mask, SC->tmp, (size_t)g_n);
         }
     }
     return true;
@@ -827,11 +820,12 @@ static bool is_better(bool have, int inliers, float rms, int cand_inliers, float
 }
 
 bool mag_fit(const float (*points)[3], size_t n, float noise_ut, const mag_fit_t *start,
-             mag_fit_t *out, bool *inlier)
+             mag_fit_t *out, bool *inlier, mag_fit_scratch_t *scratch)
 {
-    if (!points || !out) {
+    if (!points || !out || !scratch) {
         return false;
     }
+    SC = scratch;
     if (n > MAG_FIT_MAX_POINTS) {
         n = MAG_FIT_MAX_POINTS;
     }
@@ -843,7 +837,7 @@ bool mag_fit(const float (*points)[3], size_t n, float noise_ut, const mag_fit_t
     g_n = 0;
     for (size_t i = 0; i < n; i++) {
         if (isfinite(points[i][0]) && isfinite(points[i][1]) && isfinite(points[i][2])) {
-            g_idx[g_n++] = (uint16_t)i;
+            SC->idx[g_n++] = (uint16_t)i;
         }
     }
     if (g_n < MAG_FIT_MIN_POINTS) {
@@ -877,11 +871,11 @@ bool mag_fit(const float (*points)[3], size_t n, float noise_ut, const mag_fit_t
         if (positive_definite(seed.w)) {
             model_t got;
             int got_inliers;
-            if (fit_from(&seed, noise_ut, &got, s_mask, &got_inliers)) {
+            if (fit_from(&seed, noise_ut, &got, SC->mask, &got_inliers)) {
                 best = got;
                 best_inliers = got_inliers;
-                best_rms = masked_rms(&got, s_mask);
-                memcpy(s_best, s_mask, (size_t)g_n);
+                best_rms = masked_rms(&got, SC->mask);
+                memcpy(SC->best, SC->mask, (size_t)g_n);
                 have = true;
             }
         }
@@ -892,11 +886,11 @@ bool mag_fit(const float (*points)[3], size_t n, float noise_ut, const mag_fit_t
         if (kasa(NULL, &k)) {
             model_t got;
             int got_inliers;
-            if (fit_from(&k, noise_ut, &got, s_mask, &got_inliers)) {
+            if (fit_from(&k, noise_ut, &got, SC->mask, &got_inliers)) {
                 best = got;
                 best_inliers = got_inliers;
-                best_rms = masked_rms(&got, s_mask);
-                memcpy(s_best, s_mask, (size_t)g_n);
+                best_rms = masked_rms(&got, SC->mask);
+                memcpy(SC->best, SC->mask, (size_t)g_n);
                 have = true;
             }
         }
@@ -912,15 +906,15 @@ bool mag_fit(const float (*points)[3], size_t n, float noise_ut, const mag_fit_t
             }
             model_t got;
             int got_inliers;
-            if (!fit_from(&seed2, noise_ut, &got, s_mask, &got_inliers)) {
+            if (!fit_from(&seed2, noise_ut, &got, SC->mask, &got_inliers)) {
                 continue;
             }
-            float rms = masked_rms(&got, s_mask);
+            float rms = masked_rms(&got, SC->mask);
             if (is_better(have, best_inliers, best_rms, got_inliers, rms)) {
                 best = got;
                 best_inliers = got_inliers;
                 best_rms = rms;
-                memcpy(s_best, s_mask, (size_t)g_n);
+                memcpy(SC->best, SC->mask, (size_t)g_n);
                 have = true;
             }
         }
@@ -928,10 +922,10 @@ bool mag_fit(const float (*points)[3], size_t n, float noise_ut, const mag_fit_t
     if (!have) {
         return false;
     }
-    finish(&best, s_best, best_inliers, out);
+    finish(&best, SC->best, best_inliers, out);
     if (inlier) {
         for (int i = 0; i < g_n; i++) {
-            inlier[g_idx[i]] = s_best[i] != 0;
+            inlier[SC->idx[i]] = SC->best[i] != 0;
         }
     }
     return isfinite(out->radius) && isfinite(out->rms);

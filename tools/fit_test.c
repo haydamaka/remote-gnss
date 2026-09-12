@@ -11,6 +11,9 @@
 
 #include "mag_fit.h"
 
+// The fit works in scratch the caller owns; on a host it can simply be static.
+static mag_fit_scratch_t scratch;
+
 static float points[MAG_FIT_MAX_POINTS][3];
 static bool inlier[MAG_FIT_MAX_POINTS];
 
@@ -104,7 +107,7 @@ static void degenerate(void)
                 points[i][2] = -10.0f;
             }
         }
-        bool ok = mag_fit(points, n, 0.5f, NULL, &fit, inlier);
+        bool ok = mag_fit(points, n, 0.5f, NULL, &fit, inlier, &scratch);
         bool sane = !ok || (isfinite(fit.radius) && isfinite(fit.rms) && isfinite(fit.offset[0])
                             && fit.inliers <= (uint16_t)n);
         printf("%-14s n=%3d -> %-5s %s", cases[c].name, n, ok ? "fit" : "none", sane ? "sane" : "INSANE");
@@ -140,21 +143,21 @@ int main(int argc, char **argv)
         struct timespec a, b;
         clock_gettime(CLOCK_MONOTONIC, &a);
         for (int i = 0; i < runs; i++) {
-            mag_fit(points, n, 0.5f, NULL, &fit, NULL);
+            mag_fit(points, n, 0.5f, NULL, &fit, NULL, &scratch);
         }
         clock_gettime(CLOCK_MONOTONIC, &b);
         double cold = ((b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6) / runs;
         mag_fit_t warm = fit;
         clock_gettime(CLOCK_MONOTONIC, &a);
         for (int i = 0; i < runs; i++) {
-            mag_fit(points, n, 0.5f, &warm, &fit, NULL);
+            mag_fit(points, n, 0.5f, &warm, &fit, NULL, &scratch);
         }
         clock_gettime(CLOCK_MONOTONIC, &b);
         double hot = ((b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6) / runs;
         printf("points %d  cold %.2f ms  continued %.2f ms  (host)\n", n, cold, hot);
         return 0;
     }
-    if (!mag_fit(points, n, 0.5f, NULL, &fit, inlier)) {
+    if (!mag_fit(points, n, 0.5f, NULL, &fit, inlier, &scratch)) {
         printf("no fit\n");
         return 1;
     }

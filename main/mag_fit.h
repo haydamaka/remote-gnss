@@ -11,6 +11,22 @@
 // CALIBRATION.md sections 2, 3.1 and 3.3 explain the algorithm.
 
 #define MAG_FIT_MAX_POINTS 400
+#define MAG_FIT_CELLS 100  // equal-area direction cells, as CALIBRATION.md 3.2
+
+// The fit's working arrays, about 7 kB. They used to be static inside mag_fit.c,
+// which meant the firmware carried them whether or not anything was calibrating.
+// The caller now owns them and can free them between sessions.
+typedef struct {
+    uint16_t idx[MAG_FIT_MAX_POINTS];  // the finite readings, into the caller's array
+    float    res[MAG_FIT_MAX_POINTS];
+    float    sort[MAG_FIT_MAX_POINTS];
+    uint8_t  mask[MAG_FIT_MAX_POINTS];
+    uint8_t  best[MAG_FIT_MAX_POINTS];
+    uint8_t  tmp[MAG_FIT_MAX_POINTS];
+    double   a[9][10];
+    uint8_t  cell_n[MAG_FIT_CELLS];
+    float    cell_v[MAG_FIT_CELLS][3];
+} mag_fit_scratch_t;
 #define MAG_FIT_MIN_POINTS 20
 
 // How many parameters the fit dares to use, chosen from the coverage.
@@ -45,9 +61,10 @@ typedef struct {
 // Returns false only when no usable fit exists at all (too few readings, or the
 // numbers never settled). A fit that is merely not good enough yet is returned
 // with its metrics, and the caller applies the criteria of CALIBRATION.md §2.
-// Not reentrant: it works in static scratch buffers.
+// Not reentrant: one fit at a time, in the scratch the caller passes in.
 bool mag_fit(const float (*points)[3], size_t n, float noise_ut,
-             const mag_fit_t *start, mag_fit_t *out, bool *inlier);
+             const mag_fit_t *start, mag_fit_t *out, bool *inlier,
+             mag_fit_scratch_t *scratch);
 
 // Whether a fit is sane enough to define the direction cells. An arc of readings
 // fits a huge sphere well, and binning by that sends every reading into one cell.
