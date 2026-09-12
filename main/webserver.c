@@ -121,6 +121,11 @@ static void json_str(json_t *j, const char *key, const char *s)
     json_append(j, "\"");
 }
 
+// Scratch for whichever request is being served. The HTTP server dispatches
+// every handler from one task, so no two of them are ever live at once, and a
+// separate buffer per handler would mean carrying all of them for ever.
+static char req_scratch[4096];
+
 // Sends a built document, or 500 if it didn't fit its buffer.
 static esp_err_t send_json(httpd_req_t *req, const json_t *j, const char *what)
 {
@@ -305,6 +310,7 @@ static esp_err_t status_get(httpd_req_t *req)
     json_str(&j, "built", built);
     json_str(&j, "partition", esp_ota_get_running_partition()->label);
     json_int(&j, "heap_min", esp_get_minimum_free_heap_size());
+    json_int(&j, "heap_free", esp_get_free_heap_size());
     json_int(&j, "cal_stack_free", mag_cal_stack_free());
     json_close(&j);
 
@@ -318,7 +324,7 @@ static esp_err_t mag_samples_get(httpd_req_t *req)
 {
     // One httpd task serves every request, so these can be static.
     static magnetometer_sample_t samples[MAG_SAMPLES_PER_REPLY];
-    static char buf[4096];
+    char *buf = req_scratch;
 
     uint32_t since = 0;
     char query[64];  // a short buffer would turn extra parameters into "no since at all"
@@ -332,7 +338,7 @@ static esp_err_t mag_samples_get(httpd_req_t *req)
     magnetometer_data_t m;
     magnetometer_get(&m);
 
-    json_t j = {.buf = buf, .size = sizeof(buf)};
+    json_t j = {.buf = buf, .size = sizeof(req_scratch)};
     json_open(&j, NULL);
     json_str(&j, "chip", m.chip);
     json_num(&j, "ut_per_count", magnetometer_ut_per_count(), 6);
@@ -371,12 +377,12 @@ static esp_err_t cal_get(httpd_req_t *req)
     // The readings are not in here: they are several kilobytes, they change
     // only while calibrating, and the compass view never draws them. The page
     // fetches them from GET /api/cal/points when points_seq says they moved.
-    static char buf[1536];
+    char *buf = req_scratch;
 
     mag_cal_status_t s;
     mag_cal_get_status(&s);
 
-    json_t j = {.buf = buf, .size = sizeof(buf)};
+    json_t j = {.buf = buf, .size = sizeof(req_scratch)};
     json_open(&j, NULL);
     json_str(&j, "state", STATES[s.state]);
     json_str(&j, "reason", s.reason[0] ? s.reason : NULL);
@@ -452,7 +458,11 @@ static esp_err_t cal_start_post(httpd_req_t *req)
     char value[4];
     bool fresh = httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
                  httpd_query_key_value(query, "fresh", value, sizeof(value)) == ESP_OK && value[0] == '1';
-    if (mag_cal_begin(fresh) != ESP_OK) {
+    esp_err_t err = mag_cal_begin(fresh);
+    if (err == ESP_ERR_NO_MEM) {
+        return reply(req, HTTPD_500, "Not enough memory free to calibrate; try switching Bluetooth off");
+    }
+    if (err != ESP_OK) {
         return reply(req, HTTPD_400, "No magnetometer detected");
     }
     return reply(req, HTTPD_200, NULL);
@@ -463,7 +473,13 @@ static esp_err_t cal_start_post(httpd_req_t *req)
 // simply skipped.
 static esp_err_t cal_points_post(httpd_req_t *req)
 {
-    static float pts[MAG_CAL_MAX_POINTS][3];
+    // Parsed straight into the calibration scratch: a 4.8 kB buffer of our own
+    // would sit here for the life of the device to serve an occasional upload.
+    size_t max = 0;
+    float (*pts)[3] = mag_cal_load_buffer(&max);
+    if (!pts) {
+        return reply(req, HTTPD_400, "Busy fitting; try again in a moment");
+    }
     char chunk[512];
     char line[80];
     size_t line_len = 0, n = 0, got = 0;
@@ -474,11 +490,13 @@ static esp_err_t cal_points_post(httpd_req_t *req)
         int r = httpd_req_recv(req, chunk, want);
         if (r == HTTPD_SOCK_ERR_TIMEOUT) {
             if (++timeouts > 3) {
+                mag_cal_load_abandon();
                 return reply(req, HTTPD_400, "The upload stalled");
             }
             continue;
         }
         if (r <= 0) {
+            mag_cal_load_abandon();
             return ESP_FAIL;
         }
         got += r;
@@ -504,16 +522,18 @@ static esp_err_t cal_points_post(httpd_req_t *req)
             }
             // The last three numbers on the line are x, y, z: that takes both a bare
             // x,y,z file and our recordings, which are seq,t_ms,x,y,z.
-            if (n < MAG_CAL_MAX_POINTS && k >= 3) {
+            if (n < max && k >= 3) {
                 memcpy(pts[n++], v + k - 3, 3 * sizeof(float));
             }
             line_len = 0;
         }
     }
     if (n < 20) {
+        mag_cal_load_abandon();
         return reply(req, HTTPD_400, "Too few readings in that file");
     }
     if (mag_cal_set_points(pts, n) != ESP_OK) {
+        mag_cal_load_abandon();
         return reply(req, HTTPD_500, "Could not load the readings");
     }
     return reply(req, HTTPD_200, NULL);
@@ -681,7 +701,7 @@ static esp_err_t cal_stop_post(httpd_req_t *req)
 // bootloader is pointed at it, and a bad one leaves the running firmware alone.
 static esp_err_t ota_post(httpd_req_t *req)
 {
-    static char chunk[2048];
+    char *chunk = req_scratch;
     size_t total = req->content_len;
     if (total < 4096) {
         return reply(req, HTTPD_400, "Too small to be a firmware image");
@@ -692,7 +712,7 @@ static esp_err_t ota_post(httpd_req_t *req)
     size_t got = 0;
     int timeouts = 0;
     while (got < total) {
-        size_t want = total - got < sizeof(chunk) ? total - got : sizeof(chunk);
+        size_t want = total - got < sizeof(req_scratch) ? total - got : sizeof(req_scratch);
         int n = httpd_req_recv(req, chunk, want);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
             if (++timeouts > 5) {

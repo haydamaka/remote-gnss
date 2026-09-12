@@ -13,7 +13,11 @@ import collections
 import re
 import sys
 
+# A symbol is either all on one line, or - when its name is long - just the
+# name, with the address, size and object file on the next. Missing the second
+# form silently under-counts, which is exactly what an earlier version did.
 SYMBOL = re.compile(r"^ (\.(?:bss|data|noinit|dram)\S*)\s+0x[0-9a-f]+\s+0x([0-9a-f]+)\s*(\S*)$")
+NAME_ONLY = re.compile(r"^ (\.(?:bss|data|noinit|dram)\S*)\s*$")
 WRAPPED = re.compile(r"^\s+0x[0-9a-f]+\s+0x([0-9a-f]+)\s+(\S+)$")
 
 
@@ -24,14 +28,18 @@ def parse(path):
     i = 0
     while i < len(lines):
         m = SYMBOL.match(lines[i])
-        if m:
-            name, size, obj = m.group(1), int(m.group(2), 16), m.group(3)
+        n = NAME_ONLY.match(lines[i]) if not m else None
+        if m or n:
+            if m:
+                name, size, obj = m.group(1), int(m.group(2), 16), m.group(3)
+            else:
+                name, size, obj = n.group(1), 0, ""
             if not obj and i + 1 < len(lines):
                 w = WRAPPED.match(lines[i + 1])
                 if w:
                     size, obj = int(w.group(1), 16), w.group(2)
                     i += 1
-            if size:
+            if size and obj:
                 yield size, name, obj.split("/")[-1]
         i += 1
 
@@ -66,4 +74,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BrokenPipeError:
+        pass  # piped into head

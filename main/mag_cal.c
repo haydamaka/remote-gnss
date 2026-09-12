@@ -17,6 +17,7 @@
 
 _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer readings than the buffer holds");
 
+#define LOAD_TIMEOUT_US (30 * 1000 * 1000)  // an upload that never finished
 #define NVS_NAMESPACE "magcal"
 // Version 2's "rough" byte became the quality, and its values still mean the
 // same thing (0 good, 1 rough), so stored calibrations survive the change.
@@ -120,6 +121,9 @@ static uint32_t heap_at_acquire;
 // Staging for the NVS blob, 0.1 µT units. One copy, shared by save and load.
 static int16_t packed[MAG_CAL_MAX_POINTS][3];
 
+static bool fitting;        // a fit is using the scratch right now, off the lock
+static bool loading;        // an upload is parsing into it, off the lock
+static int64_t loading_since;
 static bool points_dirty;
 static uint32_t points_seq;  // bumped whenever the buffer changes, so the page can tell
 static bool params_dirty;
@@ -249,10 +253,12 @@ static void add_reading(const float m[3])
     int victim = victim_in(p.cell, m, &refuse_new);
     if ((count < MAG_CAL_PER_CELL || victim < 0) && npoints < MAG_CAL_MAX_POINTS) {
         points[npoints++] = p;
+        points_changed();
     } else if (refuse_new) {
         session_refused++;  // it disagrees with its own direction more than anything stored there
     } else if (victim >= 0) {
         points[victim] = p;
+        points_changed();
     }
 }
 
@@ -310,6 +316,7 @@ static void recentre_to(const float c[3])
     if (dist(c, centre) > RECENTRE_UT && rebin_keeps_most(c)) {
         memcpy(centre, c, sizeof(centre));
         rebin();
+        points_changed();  // re-binning drops readings that no longer fit a cell
     }
 }
 
@@ -656,9 +663,9 @@ static void run_fit(void)
     size_t n;
 
     xSemaphoreTake(lock, portMAX_DELAY);
-    if (!scratch_acquire()) {
+    if (loading || !scratch_acquire()) {
         xSemaphoreGive(lock);
-        return;  // nothing to fit with; the session keeps collecting readings
+        return;  // an upload owns the snapshot, or there is nothing to fit with
     }
     float (*snapshot)[3] = scratch->snapshot;
     bool *keep = scratch->keep;
@@ -670,6 +677,7 @@ static void run_fit(void)
     have_start = have_fit;
     id = session_id;
     last_fit = esp_timer_get_time();
+    fitting = true;  // the scratch is in use from here until the lock is retaken
     xSemaphoreGive(lock);
 
     int64_t began = esp_timer_get_time();
@@ -678,6 +686,7 @@ static void run_fit(void)
     uint32_t took = (uint32_t)((esp_timer_get_time() - began) / 1000);
 
     xSemaphoreTake(lock, portMAX_DELAY);
+    fitting = false;
     if (id != session_id) {
         xSemaphoreGive(lock);  // the session was restarted while we fitted
         return;
@@ -738,7 +747,13 @@ static void cal_task(void *arg)
             // Nothing is calibrating, so nothing owns the fit scratch. Checked
             // here rather than paired with each way a session can end, so that
             // adding another way out cannot leak it.
-            if (scratch && !fit_once) {
+            // An upload parsing into the scratch owns it too. Without this the
+            // buffer is freed under the web server mid-upload.
+            if (loading && esp_timer_get_time() - loading_since > LOAD_TIMEOUT_US) {
+                ESP_LOGW(TAG, "upload never finished; taking the buffer back");
+                loading = false;
+            }
+            if (scratch && !fit_once && !fitting && !loading) {
                 scratch_release();
             }
         }
@@ -796,6 +811,7 @@ esp_err_t mag_cal_begin(bool fresh)
     if (fresh) {
         npoints = 0;
         arrivals = 0;
+        points_changed();
         // The saved calibration is still a good first guess of the centre.
         if (params.valid) {
             memcpy(centre, params.offset, sizeof(centre));
@@ -841,11 +857,36 @@ void mag_cal_stop(void)
     xSemaphoreGive(lock);
 }
 
+float (*mag_cal_load_buffer(size_t *max))[3]
+{
+    if (!started) {
+        return NULL;
+    }
+    xSemaphoreTake(lock, portMAX_DELAY);
+    float (*buf)[3] = NULL;
+    if (!fitting && !loading && scratch_acquire()) {
+        buf = scratch->snapshot;
+        *max = MAG_CAL_MAX_POINTS;
+        loading = true;  // claims it until set_points or abandon
+        loading_since = esp_timer_get_time();
+    }
+    xSemaphoreGive(lock);
+    return buf;
+}
+
+void mag_cal_load_abandon(void)
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    loading = false;
+    xSemaphoreGive(lock);
+}
+
 esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
 {
     ESP_RETURN_ON_FALSE(started, ESP_ERR_INVALID_STATE, TAG, "calibration task not running");
     ESP_RETURN_ON_FALSE(n > 0, ESP_ERR_INVALID_ARG, TAG, "no readings");
     xSemaphoreTake(lock, portMAX_DELAY);
+    loading = false;  // the upload is finished with the buffer
     state = MAG_CAL_IDLE;  // a loaded set is not a session
     session_id++;          // any fit still running belongs to the old set
     npoints = 0;

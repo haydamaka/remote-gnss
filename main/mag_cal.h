@@ -76,6 +76,16 @@ esp_err_t mag_cal_begin(bool fresh);
 // Interrupts a running session.
 void mag_cal_stop(void);
 
+// A place to parse an uploaded file into, so the web server needs no buffer of
+// its own: the fit's own snapshot array, which is idle whenever nothing is
+// fitting. Returns NULL, and writes nothing, if a fit is in progress or there
+// is no memory. Whatever is parsed into it is handed back to
+// mag_cal_set_points(); abandoning it costs nothing.
+float (*mag_cal_load_buffer(size_t *max))[3];
+
+// Gives the load buffer back without using it: a failed or abandoned upload.
+void mag_cal_load_abandon(void);
+
 // Replaces the buffered readings with a set loaded from elsewhere (a file the
 // user saved earlier). The session state is cleared; the readings are kept and
 // re-binned, so a following session continues from them.

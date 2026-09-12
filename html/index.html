@@ -509,7 +509,19 @@ function headingError() {
 
 function setMode(mode) {
   view.mode = mode;
-  // Learning the bearing from GNSS. This is the shadow-mode readout: the numbers
+  for (const input of document.querySelectorAll('input[name=plotview]')) {
+    input.checked = input.value === mode;
+  }
+  $('plot').classList.toggle('sphere', mode === 'sphere');
+  // The offset turns the compass card, so a heading means nothing over the point cloud.
+  for (const el of [$('north-set'), $('north-bearing')]) el.disabled = mode !== 'compass';
+  if (mode === 'sphere' && view.cal && view.cal.points_seq !== view.pointsSeq) {
+    fetchPoints().then(draw).catch(() => {});
+  }
+  animate();  // frame() draws once and stops if there's nothing to animate
+}
+
+// Learning the bearing from GNSS. This is the shadow-mode readout: the numbers
 // that say whether the estimate holds still are the point of it, not the offset.
 function renderBearing(b) {
   $('learn-on').checked = b.learning;
@@ -570,18 +582,6 @@ $('learn-reset').onclick = () => {
   }
 };
 $('learn-log').onclick = () => { location.href = '/api/bearing/log'; };
-
-for (const input of document.querySelectorAll('input[name=plotview]')) {
-    input.checked = input.value === mode;
-  }
-  $('plot').classList.toggle('sphere', mode === 'sphere');
-  // The offset turns the compass card, so a heading means nothing over the point cloud.
-  for (const el of [$('north-set'), $('north-bearing')]) el.disabled = mode !== 'compass';
-  if (mode === 'sphere' && view.cal && view.cal.points_seq !== view.pointsSeq) {
-    fetchPoints().then(draw).catch(() => {});
-  }
-  animate();  // frame() draws once and stops if there's nothing to animate
-}
 
 const quantile = (sorted, q) => sorted[Math.floor(q * (sorted.length - 1))];
 

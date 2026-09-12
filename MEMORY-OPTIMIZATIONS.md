@@ -31,20 +31,26 @@ Two things were wrong, and both are worth keeping in mind:
    is how the device is controlled and updated, so whatever else runs short,
    there is still a way in. That does not fix a shortage, it makes it
    survivable.
-2. **Our own code held 74 kB of static RAM** — against 16 kB for every ESP-IDF
-   library put together. The shortage was ours.
+2. **Our own code held 82 kB of static RAM** — against about 16 kB for every
+   ESP-IDF library put together. The shortage was ours.
 
-## Where the 74 kB went, and where it is now
+## Where the 82 kB went, and where it is now
 
 | | before | after | |
 |---|---|---|---|
+| `webserver.c` | 29,312 | 5,376 | `/api/cal` stopped carrying the readings; one arena for the rest |
+| `mag_cal.c` | 24,668 | 12,268 | fit scratch made dynamic; one NVS staging buffer, not two |
 | `magnetometer.c` | 16,424 | 4,136 | history 1024 → 256 samples |
-| `webserver.c` | 28,032 | 12,480 | `/api/cal` no longer carries the readings |
-| `mag_cal.c` | 19,472 | 11,872 | fit scratch made dynamic; one NVS staging buffer, not two |
 | `mag_fit.c` | 7,220 | **0** | its working arrays belong to the caller now |
-| `bearing.c` | 3,240 | 3,036 | |
-| everything else | 1,015 | 1,015 | |
-| **total** | **74,388** | **32,523** | |
+| `bearing.c` | 3,240 | 3,240 | |
+| everything else | 891 | 891 | |
+| **total** | **81,755** | **25,911** | |
+
+The first version of `tools/ram_report.py` reported 74 kB rather than 82: the
+linker map puts a long symbol name on a line of its own, with its size on the
+next, and the parser only understood the single-line form. It silently missed
+every large buffer with a long name. Both figures above come from the fixed
+one, on clean builds of the same two commits.
 
 ### 1. The magnetometer history: 16 kB → 4 kB
 
@@ -52,7 +58,7 @@ A 1024-entry ring of raw samples, so a recorder could ride out a WiFi dropout �
 100 seconds of tolerance that nothing had ever needed. At 256 it is still 25
 seconds, and it was the single largest buffer in the firmware.
 
-### 2. `/api/cal` stopped sending the readings: 17 kB
+### 2. `/api/cal` stopped sending the readings, and the handlers share an arena: 24 kB
 
 The page polled `/api/cal` every second while calibrating and **every ten
 seconds for ever afterwards**, and every reply carried the whole point cloud:
@@ -68,12 +74,22 @@ showing *and* the counter says they moved. While a session runs it refetches
 every poll regardless, because they genuinely change and the counter is then
 redundant.
 
-### 3. The fit's working memory: 17 kB, only while calibrating
+What was left — a 4 kB response buffer, a 2 kB OTA buffer and a 1.5 kB one —
+now share a single 4 kB arena. The HTTP server dispatches every handler from
+one task, so no two are ever live at once. The upload buffer went a different
+way: see below.
+
+### 3. The fit's working memory: 22 kB, only while calibrating
 
 The residual and sort arrays, the solver matrix, the direction-cell tables, the
-snapshot of the readings and the tidy-up buffer came to about 17 kB that the
+snapshot of the readings and the tidy-up buffer came to about 22 kB that the
 firmware carried whether or not anything was calibrating. They now live in one
 block that `mag_cal.c` owns and that exists only while a session does.
+
+An uploaded CSV is parsed into the same block — into the fit's own snapshot
+array, which is idle whenever nothing is fitting — so the web server needs no
+4.8 kB buffer of its own for an occasional upload. A `fitting` flag makes sure
+it is never handed out while the calibration task is using it.
 
 `tools/fit_test.c` gives byte-identical output on both recordings before and
 after the change, which is the only reason to believe the move was faithful.
@@ -111,17 +127,56 @@ taken and compared when it is released; a shortfall is logged. A mistake in the
 reasoning above shows up as a line in the log rather than as a slow death.
 
 **Failure is visible.** If the allocation fails, `mag_cal_begin()` returns
-`ESP_ERR_NO_MEM` immediately and the page says so, instead of the session
-quietly never fitting. This is the real gain from making it dynamic: a
-permanent cost became an occasional, visible, recoverable failure.
+`ESP_ERR_NO_MEM` immediately and the page says "not enough memory free to
+calibrate; try switching Bluetooth off", instead of the session quietly never
+fitting. This is the real gain from making it dynamic: a permanent cost became
+an occasional, visible, recoverable failure.
+
+### The block has three owners, not one
+
+The first version got this wrong, and review caught it before it reached the
+board. "One owner at a time" sounded true but there are **three**: the
+calibration task fitting, the calibration task releasing, and the **web server
+task parsing an upload into it**. Only the fit marked itself, so:
+
+- an upload took the pointer and started reading from the socket; within 100 ms
+  the calibration task saw nothing calibrating and freed the block underneath
+  it, and the handler then wrote 4.8 kB into freed heap;
+- and an upload during a running session was overwritten by the next fit's
+  snapshot, halfway through.
+
+Both are now closed by a `loading` flag that the upload holds: the release
+skips it, a fit refuses to start while it is set, and every exit from the
+upload handler gives it back. An upload that simply stops — a dropped
+connection — is reclaimed after 30 seconds, so a vanished client cannot pin the
+block for ever.
+
+## Measured on the device (2026-09-12)
+
+| | free heap |
+|---|---|
+| idle | 118,616 |
+| calibrating | 99,364 |
+| after stopping | 115,420 |
+| settled, repeatedly | 118,616 |
+
+The 19.5 kB is the block plus what the session itself is doing. Free heap
+returns to the same figure every time — the dips in between are the in-flight
+request's own buffers, not a leak. `heap_min` over the whole test was 80,980;
+before this work the device booted to a minimum of **300 bytes** and the web
+server could not start.
+
+`/api/cal` went from about 8 kB per poll to **381 bytes**. The 355 stored
+readings still stream in full from `/api/cal/points` (6,305 bytes), and a
+round trip through Save and Load restored all 355.
 
 ## What is left, and why
 
 | | bytes | |
 |---|---|---|
 | `mag_cal.c` `points[400]` | 8,000 | **staying.** These are the calibration readings — the state the device exists to hold. They are in NVS too, so they could be dropped when idle and streamed back from flash, but every path that wants them would then need a buffer to decode into, which is most of what was saved. 8 kB of certainty is worth more. |
-| `webserver.c` `pts[400][3]` | 4,800 | worth removing: the CSV upload could parse and feed readings incrementally rather than collecting them all first. Needs a small `begin`/`add`/`end` API on `mag_cal`. |
-| `webserver.c` `buf[4096]`, `chunk[2048]`, `buf[1536]` | 7,680 | one handler runs at a time, so these could share a single arena — about 3.5 kB back. Cheap, but each handler must be checked for using two of them at once. |
+| `webserver.c` `req_scratch[4096]` | 4,096 | the shared request arena, sized by the largest user. |
+| `webserver.c` `samples[…]` | 1,280 | the magnetometer sample batch for `/api/mag/samples`. |
 | `magnetometer.c` `history[256]` | 4,096 | lower it again if the recorder's dropout tolerance is not wanted. |
 | `bearing.c` `st` | 3,036 | the learning state and the drive trace. Persistent by design; the trace is 1,920 of it and halves to one hour if needed. |
 | `mag_cal.c` `packed[400][3]` | 2,400 | the NVS staging buffer, shared between save and load. Needed whenever the readings are written or read. |
