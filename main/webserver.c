@@ -19,6 +19,7 @@
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
 
+#include "bearing.h"
 #include "gnss.h"
 #include "mag_cal.h"
 #include "magnetometer.h"
@@ -498,6 +499,128 @@ static esp_err_t cal_accept_post(httpd_req_t *req)
     return reply(req, HTTPD_200, NULL);
 }
 
+// What has been learned from driving, and how much it can be trusted.
+static esp_err_t bearing_get_handler(httpd_req_t *req)
+{
+    bearing_status_t b;
+    bearing_get(&b);
+    const bearing_quality_t *q = &b.result.quality;
+
+    char buf[1400];
+    json_t j = {.buf = buf, .size = sizeof(buf)};
+    json_open(&j, NULL);
+    json_bool(&j, "learning", b.learning);
+    json_bool(&j, "applying", b.applying);
+    json_bool(&j, "have", b.have);
+    json_num(&j, "offset", b.offset_deg, 2);
+    json_num(&j, "hours", b.total_hours, 3);
+    json_int(&j, "windows", b.result.windows);
+    json_int(&j, "sectors", b.result.sectors);
+    json_int(&j, "terms", b.result.terms);
+    json_int(&j, "remounts", (int)b.result.remounts);
+    json_int(&j, "trace", (int)b.trace_used);
+    json_num(&j, "once_round", b.result.once_round_deg, 2);
+    json_num(&j, "twice_round", b.result.twice_round_deg, 2);
+    json_num(&j, "residual_hard_ut", b.result.residual_hard_ut, 3);
+    json_num(&j, "soft_asym_pct", b.result.soft_asym_pct, 2);
+
+    json_open(&j, "coef");
+    static const char *names[5] = {"a", "b", "c", "d", "e"};
+    for (int i = 0; i < 5; i++) {
+        json_num(&j, names[i], b.result.coef[i], 3);
+    }
+    json_close(&j);
+
+    // The numbers a drive is meant to produce: none of them come from the
+    // fit's own standard error, which is far too pleased with itself.
+    json_open(&j, "quality");
+    json_num(&j, "resid_rms", q->resid_rms_deg, 3);
+    json_num(&j, "resid_bias", q->resid_bias_deg, 3);
+    json_num(&j, "resid_max", q->resid_max_deg, 2);
+    json_int(&j, "resid_n", (int)q->resid_n);
+    json_num(&j, "split", q->split_deg, 3);
+    json_num(&j, "drift_per_hour", q->drift_deg_per_hour, 3);
+    json_num(&j, "range", q->range_deg, 3);
+    json_num(&j, "accept_pct", q->accept_pct, 1);
+    json_int(&j, "windows_seen", (int)q->windows_seen);
+    json_close(&j);
+
+    json_int(&j, "stack_free", (int)b.stack_free);
+    json_int(&j, "fixes_seen", (int)b.fixes_seen);
+    json_int(&j, "fixes_usable", (int)b.fixes_usable);
+    json_open(&j, "blocked");
+    for (int i = 0; i < BEARING_BLOCKS; i++) {
+        if (b.blocked[i]) {
+            json_int(&j, bearing_block_name((bearing_block_t)i), (int)b.blocked[i]);
+        }
+    }
+    json_close(&j);
+
+    json_open(&j, "rejected");
+    for (int i = 1; i < BEARING_REASONS; i++) {
+        if (b.result.rejected[i]) {
+            json_int(&j, bearing_reject_name((bearing_reject_t)i), (int)b.result.rejected[i]);
+        }
+    }
+    json_close(&j);
+
+    json_close(&j);
+    return send_json(req, &j, "bearing");
+}
+
+// The whole drive, a row a minute, for working out offline whether it settled.
+static esp_err_t bearing_log_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "text/csv");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"bearing.csv\"");
+    const char *head = "t_s,offset_deg,resid_rms_deg,split_deg,sectors,terms,accept_pct,remounts\n";
+    httpd_resp_send_chunk(req, head, HTTPD_RESP_USE_STRLEN);
+    // A record at a time: there is no RAM to spare for a second copy of the ring.
+    bearing_trace_t r;
+    for (size_t i = 0; bearing_trace_at(i, &r); i++) {
+        char line[96];
+        int len = snprintf(line, sizeof(line), "%u,%.2f,%.2f,%.2f,%u,%u,%u,%u\n",
+                           (unsigned)r.t_s, r.offset_cdeg / 100.0f,
+                           r.resid_rms_cdeg / 100.0f, r.split_cdeg / 100.0f,
+                           r.sectors, r.terms, r.accept_pct, r.remounts);
+        httpd_resp_send_chunk(req, line, len);
+    }
+    return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+static esp_err_t bearing_post(httpd_req_t *req)
+{
+    char body[96], value[8];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return reply(req, HTTPD_400, "The request was too long");
+    }
+    esp_err_t err = ESP_OK;
+    bool did = false;
+    if (httpd_query_key_value(body, "reset", value, sizeof(value)) == ESP_OK && value[0] == '1') {
+        err = bearing_reset();
+        did = true;
+    }
+    if (err == ESP_OK && httpd_query_key_value(body, "learning", value, sizeof(value)) == ESP_OK) {
+        err = bearing_set_learning(value[0] == '1');
+        did = true;
+    }
+    if (err == ESP_OK && httpd_query_key_value(body, "applying", value, sizeof(value)) == ESP_OK) {
+        err = bearing_set_applying(value[0] == '1');
+        did = true;
+    }
+    if (err == ESP_OK && httpd_query_key_value(body, "save", value, sizeof(value)) == ESP_OK) {
+        err = bearing_save();
+        did = true;
+    }
+    if (!did) {
+        return reply(req, HTTPD_400, "Nothing to do");
+    }
+    if (err != ESP_OK) {
+        return reply(req, HTTPD_500, "Could not save the setting");
+    }
+    return reply(req, HTTPD_200, NULL);
+}
+
 // Turns the compass card so it reads north where the user says north is.
 static esp_err_t heading_post(httpd_req_t *req)
 {
@@ -637,6 +760,9 @@ esp_err_t webserver_start(void)
         {.uri = "/api/cal/accept", .method = HTTP_POST, .handler = cal_accept_post},
         {.uri = "/api/cal/points", .method = HTTP_POST, .handler = cal_points_post},
         {.uri = "/api/heading", .method = HTTP_POST, .handler = heading_post},
+        {.uri = "/api/bearing", .method = HTTP_GET, .handler = bearing_get_handler},
+        {.uri = "/api/bearing/log", .method = HTTP_GET, .handler = bearing_log_get},
+        {.uri = "/api/bearing", .method = HTTP_POST, .handler = bearing_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
         {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},

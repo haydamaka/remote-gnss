@@ -81,6 +81,9 @@ home network.
 | `POST /api/cal/start[?fresh=1]` | start a session; it continues from the saved readings unless `fresh=1` |
 | `POST /api/cal/stop` | interrupt a session, keeping what is worth keeping |
 | `POST /api/cal/accept` | save the current fit although it is below the quality bar |
+| `GET /api/bearing` | what driving has taught it, how much it wanders, and why fixes were turned away |
+| `GET /api/bearing/log` | the drive as CSV, a row a minute |
+| `POST /api/bearing` | `learning`, `applying`, `reset` or `save`, form-encoded |
 | `POST /api/heading` | `offset` in degrees, form-encoded: the correction added to the measured heading |
 | `POST /api/cal/points` | replace the buffered readings with a CSV (`x,y,z` or `seq,t_ms,x,y,z`) |
 | `POST /api/wifi` | `ssid` and `password`, form-encoded: save and restart |
@@ -135,7 +138,21 @@ trusted. Two independent sources, because either alone can be fooled:
 - **Learning the offset from GNSS:** when the device is moving and the fix is
   not spoofed, the GNSS course over ground says which way it is travelling, and
   the difference from the measured heading is the mounting offset. Switched on
-  with a checkbox. Plan: [BEARING-CALIBRATION.md](BEARING-CALIBRATION.md).
+  with a checkbox. Algorithm: [BEARING-CALIBRATION.md](BEARING-CALIBRATION.md).
+  - It starts in **shadow mode**: it measures and says what it *would* set, and
+    changes nothing until "Use what it learns" is ticked as well.
+  - A **drive decides whether it is worth keeping**, so the page and the API
+    report how much the estimate wanders rather than how confident the fit is:
+    drift in degrees per hour, how far it moved at its widest, how far two
+    independent halves of the data disagree, and how well it predicts the next
+    straight run it has not seen. The fit's own standard error is not reported;
+    it is far too pleased with itself to be useful.
+  - The state and a **record a minute of qualifying driving** are kept in NVS,
+    so a trip survives the engine being switched off, and the log can be
+    downloaded as CSV afterwards.
+  - When nothing qualifies, it says what stopped it — no fix, faked signals,
+    too few satellites, an uncalibrated magnetometer, a disturbed field — so a
+    fruitless drive can be told apart from one that never got going.
 
 ## Magnetometer calibration
 
@@ -181,6 +198,9 @@ trusted. Two independent sources, because either alone can be fooled:
 | `magnetometer.c` | Reads the QMC5883P/L or IST8310 on I2C                  |
 | `mag_cal.c`      | Calibration sessions, direction cells, criteria, NVS storage |
 | `mag_fit.c`      | The fit itself: robust 9-parameter ellipsoid, no RTOS or storage |
+| `bearing.c`      | Learns the bearing offset while driving; NVS, trace log  |
+| `bearing_cal.c`  | The estimator: straight-run windows, sectors, deviation coefficients |
+| `wmm.c`          | World magnetic model: declination and field strength    |
 | `ota.c`          | Firmware updates over WiFi                              |
 
 minmea (https://github.com/kosma/minmea) is vendored in `components/minmea`.
