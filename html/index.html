@@ -62,7 +62,8 @@
     display: inline-flex; align-self: flex-start; gap: 3px; padding: 3px;
     border: 1px solid var(--line); border-radius: 9px;
   }
-  .segmented input { position: absolute; opacity: 0; pointer-events: none; }
+  /* Off-screen but for the label: width comes from the global input rule otherwise. */
+  .segmented input { position: absolute; width: auto; opacity: 0; pointer-events: none; }
   .segmented span {
     display: block; padding: 5px 12px; border-radius: 6px; color: var(--muted);
     font-size: 13px; font-weight: 600; cursor: pointer;
