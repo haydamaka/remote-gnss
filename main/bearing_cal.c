@@ -242,7 +242,12 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
         st->speed_min = st->speed_max = s->speed_mps;
     } else {
         // A hole in the fixes makes this two short windows, not one long one.
-        if (s->t - st->t_last > 1.0f) {
+        // The threshold has to follow the receiver: a ZED-F9P fixes once a
+        // second by default, where an M10 does it ten times, and a fixed
+        // one-second rule would throw away every window from the former.
+        float dt = s->t - st->t_last;
+        st->interval = st->interval > 0.0f ? 0.95f * st->interval + 0.05f * dt : dt;
+        if (dt > 2.5f * st->interval && dt > 0.3f) {
             st->window_dead = true;
             st->window_why = BEARING_GAP;
         }
@@ -301,7 +306,8 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
 
     if (st->window_dead) {
         why = st->window_why;
-    } else if (n < 8) {
+    } else if (n < 6) {
+        // Six points is the least that can show a line and a scatter about it.
         why = BEARING_SHORT;
     } else if (st->speed_max - st->speed_min > c->speed_tol * st->speed_min) {
         why = BEARING_SPEED_CHANGED;
@@ -337,7 +343,7 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
         // of how good the fixes should have been. Course errors correlate over
         // a few seconds, so the window is worth dur/5 independent samples.
         float var = st->sum_dd / (float)n - mean_rel * mean_rel;
-        float n_eff = dur / 5.0f;
+        float n_eff = dur / 5.0f;  // course errors correlate over about five seconds
         if (n_eff < 1.0f) {
             n_eff = 1.0f;
         }

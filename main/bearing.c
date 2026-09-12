@@ -195,10 +195,20 @@ static bool local_field(const gnss_data_t *g, float *decl, float *horizontal)
 
 static void tick(void)
 {
+    static int64_t last_epoch;
+
     gnss_data_t g;
     magnetometer_data_t m;
     gnss_get(&g);
     magnetometer_get(&m);
+
+    // One sample per navigation solution, not per task tick: a ZED-F9P fixes
+    // once a second by default and an M10 ten times, and feeding the same fix
+    // ten times over would put ten copies of one measurement into the window.
+    if (g.epoch_us == last_epoch) {
+        return;
+    }
+    last_epoch = g.epoch_us;
 
     float decl = 0.0f, horizontal = 0.0f;
     bool have_wmm = local_field(&g, &decl, &horizontal);

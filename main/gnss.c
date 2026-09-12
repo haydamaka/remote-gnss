@@ -20,11 +20,18 @@
 #define UART_RX_BUF_SIZE 2048
 #define NO_DATA_WARN_US (5 * 1000 * 1000)
 #define STATUS_POLL_US (2 * 1000 * 1000)
+#define BAUD_TRY_US (3 * 1000 * 1000)  // long enough for a sentence at any of these rates
 #define IMPLAUSIBLE_SPEED_KMH 900.0f  // faster than an airliner: the fix jumped
 #define IMPLAUSIBLE_MIN_KM 0.5        // below this, a "jump" is just multipath
 #define STALE_US (10 * 1000 * 1000)   // a warning older than this says nothing
 
 static const char *TAG = "gnss";
+
+// Receivers disagree about the default: the WS-M181's M10 talks at 115200,
+// a ZED-F9P at 38400 out of the box. Rather than make it a setting nobody
+// remembers, try the configured rate first and then the usual suspects until
+// a sentence passes its checksum.
+static const int BAUDS[] = {CONFIG_RGNSS_GNSS_BAUD, 38400, 115200, 9600, 57600, 230400, 460800};
 
 // Written only by the reader task, which may therefore read it unlocked;
 // everyone else copies it out under the lock.
@@ -64,7 +71,9 @@ static void handle_gga(const char *line)
         }
     }
 
+    int64_t now = esp_timer_get_time();
     taskENTER_CRITICAL(&lock);
+    data.epoch_us = now;  // one GGA per navigation solution, whatever the rate
     data.fix = fix;
     data.fix_quality = f.fix_quality;
     data.satellites = f.satellites_tracked;
@@ -267,7 +276,30 @@ static void reader_task(void *arg)
     int64_t last_poll = 0;
     bool warned = false;
 
+    size_t baud_idx = 0;
+    int64_t baud_since = esp_timer_get_time();
+    bool locked = false;
+
     for (;;) {
+        // Hunt for the rate until something checksums, then stay there.
+        if (!locked) {
+            if (data.sentences > 0) {
+                locked = true;
+                ESP_LOGI(TAG, "receiver found at %d baud", data.baud);
+            } else if (esp_timer_get_time() - baud_since > BAUD_TRY_US) {
+                baud_idx = (baud_idx + 1) % (sizeof(BAUDS) / sizeof(BAUDS[0]));
+                if (BAUDS[baud_idx] == CONFIG_RGNSS_GNSS_BAUD && baud_idx != 0) {
+                    baud_idx = (baud_idx + 1) % (sizeof(BAUDS) / sizeof(BAUDS[0]));  // already tried
+                }
+                data.baud = BAUDS[baud_idx];
+                uart_set_baudrate(GNSS_UART, data.baud);
+                uart_flush_input(GNSS_UART);
+                baud_since = esp_timer_get_time();
+                len = 0;
+                ESP_LOGI(TAG, "nothing at the last rate; trying %d baud", data.baud);
+            }
+        }
+
         if (esp_timer_get_time() - last_poll > STATUS_POLL_US) {
             last_poll = esp_timer_get_time();
             uart_write_bytes(GNSS_UART, POLL_NAV_STATUS, sizeof(POLL_NAV_STATUS));
@@ -328,6 +360,7 @@ esp_err_t gnss_start(void)
     data.hdop = NAN;
     data.speed_kmh = NAN;
     data.course_deg = NAN;
+    data.baud = CONFIG_RGNSS_GNSS_BAUD;
 
     const uart_config_t cfg = {
         .baud_rate = CONFIG_RGNSS_GNSS_BAUD,
@@ -343,7 +376,7 @@ esp_err_t gnss_start(void)
                                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE), TAG, "set pins");
     ESP_RETURN_ON_FALSE(xTaskCreate(reader_task, "gnss", 4096, NULL, 5, NULL) == pdPASS, ESP_ERR_NO_MEM,
                         TAG, "create task");
-    ESP_LOGI(TAG, "reading UART1 (RX GPIO%d, TX GPIO%d) at %d baud", CONFIG_RGNSS_GNSS_RX_GPIO,
+    ESP_LOGI(TAG, "reading UART1 (RX GPIO%d, TX GPIO%d), starting at %d baud", CONFIG_RGNSS_GNSS_RX_GPIO,
              CONFIG_RGNSS_GNSS_TX_GPIO, CONFIG_RGNSS_GNSS_BAUD);
     return ESP_OK;
 }

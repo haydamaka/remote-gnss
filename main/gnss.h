@@ -16,7 +16,9 @@ typedef enum {
 // Latest state from the GNSS receiver. Unknown numbers are NaN.
 typedef struct {
     uint32_t sentences;   // valid NMEA sentences received since boot
+    int baud;             // the rate it was actually found at
     int64_t updated_us;   // esp_timer time of the last valid sentence, 0 if none yet
+    int64_t epoch_us;     // ...of the last GGA, i.e. one per navigation solution
     bool fix;
     int fix_quality;      // GGA: 0 none, 1 GPS, 2 DGPS, 4 RTK fixed, 5 RTK float, 6 dead reckoning
     int satellites;       // used in the fix

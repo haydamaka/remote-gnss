@@ -139,6 +139,7 @@ typedef struct {
     float d_first, sum_d, sum_dd;   // delta, relative to the window's first
     float speed_min, speed_max;
     float head_sum_x, head_sum_y;   // mean heading, for picking the sector
+    float interval;                 // the receiver's own fix interval, learned
     bool  window_dead;              // a gate failed; run it out and drop it
     bearing_reject_t window_why;
 

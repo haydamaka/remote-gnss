@@ -239,6 +239,7 @@ static esp_err_t status_get(httpd_req_t *req)
 
     json_open(&j, "gnss");
     json_int(&j, "sentences", g.sentences);
+    json_int(&j, "baud", g.baud);
     json_num(&j, "age_ms", age_ms(g.updated_us), 0);
     json_bool(&j, "fix", g.fix);
     json_int(&j, "quality", g.fix_quality);

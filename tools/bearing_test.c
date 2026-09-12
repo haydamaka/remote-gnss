@@ -12,8 +12,8 @@
 #include <string.h>
 
 #define DEG (M_PI / 180.0)
-#define HZ 10
-#define DT (1.0f / HZ)
+static int HZ = 10;          // the receiver's fix rate; an F9P defaults to 1
+#define DT (1.0f / (float)HZ)
 
 static int failures;
 
@@ -104,7 +104,7 @@ static void step(trip_t *tr)
         .usable = tr->usable,
     };
     bearing_cal_feed(tr->cal, &s);
-    tr->t += DT;
+    tr->t += DT * (1.0f + 0.08f * (uniform() - 0.5f) * 2.0f);  // fixes are not a metronome
 }
 
 static void drive_straight(trip_t *tr, float heading, float speed, float seconds)
@@ -413,6 +413,33 @@ static void test_quality_when_steady(void)
     check("offset still right", r.offset_deg, w.mount_deg, 1.0f);
 }
 
+// A ZED-F9P fixes once a second out of the box, where the M10 does it ten
+// times. Everything should still work, with a tenth of the samples.
+static void test_one_hertz_receiver(void)
+{
+    printf("\nThe same drive from a receiver that only fixes once a second\n");
+    HZ = 1;
+    world_t w = {.mount_deg = 77.0f, .hard_x_ut = 0.34f, .soft_eps = 0.037f,
+                 .h_field_ut = 19.4f, .decl_deg = 8.6f,
+                 .course_sigma_v = 0.05f, .heading_sigma = 0.5f};
+    bearing_cfg_t cfg;
+    bearing_cal_defaults(&cfg);
+    cfg.h_field_ut = w.h_field_ut;
+    bearing_cal_t cal;
+    bearing_cal_init(&cal, &cfg);
+    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+
+    for (int i = 0; i < 6; i++) {
+        town_trip(&tr, 12, 40.0f, 15.0f);
+    }
+    bearing_result_t r;
+    bearing_cal_result(&cal, &r);
+    report_rejects(&r);
+    check_true("still applies it", r.have, true);
+    check("offset", r.offset_deg, w.mount_deg, 1.5f);
+    HZ = 10;
+}
+
 int main(void)
 {
     test_mounting_offset();
@@ -423,6 +450,7 @@ int main(void)
     test_remount();
     test_quality_when_steady();
     test_quality_catches_drift();
+    test_one_hertz_receiver();
     printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "all passed", failures,
            failures == 1 ? "" : "s");
     return failures ? 1 : 0;
