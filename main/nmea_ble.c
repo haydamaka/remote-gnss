@@ -45,8 +45,14 @@
 // Survives a restart but not a power cycle: set when BLE hands the radio over,
 // so the restart that follows comes up on WiFi even though the saved
 // preference still says BLE. Power it off and on and it starts on BLE again.
+//
+// RTC_NOINIT_ATTR, not RTC_DATA_ATTR: the latter is zeroed on every start-up,
+// including esp_restart(), so the flag never reached the next boot and the
+// device went straight back to BLE. Uninitialised memory reads as anything, so
+// only the magic value counts as "set" -- which is also what makes a power
+// cycle mean "start on BLE again".
 #define WIFI_THIS_BOOT_MAGIC 0x57494649u
-static RTC_DATA_ATTR uint32_t wifi_this_boot;
+static RTC_NOINIT_ATTR uint32_t wifi_this_boot;
 
 static const char *TAG = "nmea_ble";
 
