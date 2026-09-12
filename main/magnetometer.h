@@ -12,8 +12,25 @@ typedef struct {
     float field_ut[3];    // X, Y, Z in microtesla
 } magnetometer_data_t;
 
+// One entry of the recent-samples history.
+typedef struct {
+    uint32_t seq;         // 1 for the first sample after boot, then +1 per sample
+    uint32_t t_ms;        // esp_timer time
+    int16_t raw[3];       // X, Y, Z counts
+} magnetometer_sample_t;
+
+// About 100 s at 10 Hz, so a recorder rides out a WiFi dropout.
+#define MAGNETOMETER_HISTORY 1024
+
 // Finds a QMC5883P, QMC5883L or IST8310 on the I2C pins from menuconfig
 // "Remote GNSS → Magnetometer" and starts sampling it.
 esp_err_t magnetometer_start(void);
 
 void magnetometer_get(magnetometer_data_t *out);
+
+// Copies up to max of the last MAGNETOMETER_HISTORY samples with seq > since,
+// oldest first, and returns how many. latest gets the newest seq (0 if none).
+size_t magnetometer_samples_since(uint32_t since, magnetometer_sample_t *out, size_t max, uint32_t *latest);
+
+// Microtesla per raw count for the detected chip; 0 if none was found.
+float magnetometer_ut_per_count(void);

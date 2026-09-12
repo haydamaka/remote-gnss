@@ -75,6 +75,8 @@ static uint8_t chip_addr;
 
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static magnetometer_data_t data;
+static magnetometer_sample_t history[MAGNETOMETER_HISTORY];
+static uint32_t next_seq = 1;
 
 static esp_err_t read_regs(uint8_t reg, uint8_t *buf, size_t len)
 {
@@ -201,6 +203,10 @@ static void sample_task(void *arg)
         memcpy(data.raw, raw, sizeof(raw));
         memcpy(data.field_ut, field_ut, sizeof(field_ut));
         data.updated_us = now;
+        magnetometer_sample_t *h = &history[next_seq % MAGNETOMETER_HISTORY];
+        h->seq = next_seq++;
+        h->t_ms = (uint32_t)(now / 1000);
+        memcpy(h->raw, raw, sizeof(raw));
         taskEXIT_CRITICAL(&lock);
     }
 }
@@ -231,19 +237,36 @@ esp_err_t magnetometer_start(void)
         return ESP_ERR_NOT_FOUND;
     }
 
+    // On any failure below, chip goes back to NULL: a half-initialised sensor
+    // must not look present to the rest of the firmware.
     for (size_t i = 0; i < chip->init_len; i++) {
-        ESP_RETURN_ON_ERROR(write_reg(chip->init[i][0], chip->init[i][1]), TAG,
-                            "write 0x%02x to register 0x%02x", chip->init[i][1], chip->init[i][0]);
+        err = write_reg(chip->init[i][0], chip->init[i][1]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "write 0x%02x to register 0x%02x: %s", chip->init[i][1], chip->init[i][0],
+                     esp_err_to_name(err));
+            goto fail;
+        }
     }
-    if (chip->trigger[0]) {
-        ESP_RETURN_ON_ERROR(write_reg(chip->trigger[0], chip->trigger[1]), TAG, "trigger first sample");
+    if (chip->trigger[0] && (err = write_reg(chip->trigger[0], chip->trigger[1])) != ESP_OK) {
+        ESP_LOGE(TAG, "trigger first sample: %s", esp_err_to_name(err));
+        goto fail;
     }
     data.chip = chip->name;
 
-    ESP_RETURN_ON_FALSE(xTaskCreate(sample_task, "mag", 3072, NULL, 5, NULL) == pdPASS, ESP_ERR_NO_MEM,
-                        TAG, "create task");
+    if (xTaskCreate(sample_task, "mag", 3072, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "create task");
+        data.chip = NULL;
+        err = ESP_ERR_NO_MEM;
+        goto fail;
+    }
     ESP_LOGI(TAG, "%s at 0x%02x, sampling every %d ms", chip->name, chip_addr, SAMPLE_MS);
     return ESP_OK;
+
+fail:
+    i2c_master_bus_rm_device(dev);
+    dev = NULL;
+    chip = NULL;
+    return err;
 }
 
 void magnetometer_get(magnetometer_data_t *out)
@@ -251,4 +274,25 @@ void magnetometer_get(magnetometer_data_t *out)
     taskENTER_CRITICAL(&lock);
     *out = data;
     taskEXIT_CRITICAL(&lock);
+}
+
+size_t magnetometer_samples_since(uint32_t since, magnetometer_sample_t *out, size_t max, uint32_t *latest)
+{
+    size_t n = 0;
+    taskENTER_CRITICAL(&lock);
+    uint32_t first = since + 1;
+    if (next_seq > MAGNETOMETER_HISTORY && first < next_seq - MAGNETOMETER_HISTORY) {
+        first = next_seq - MAGNETOMETER_HISTORY;  // older ones are overwritten
+    }
+    for (uint32_t s = first; s < next_seq && n < max; s++) {
+        out[n++] = history[s % MAGNETOMETER_HISTORY];
+    }
+    *latest = next_seq - 1;
+    taskEXIT_CRITICAL(&lock);
+    return n;
+}
+
+float magnetometer_ut_per_count(void)
+{
+    return chip ? chip->ut_per_count : 0.0f;
 }

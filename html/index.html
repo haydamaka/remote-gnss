@@ -47,9 +47,26 @@
   }
   .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 8px; }
   .buttons button { padding: 9px 16px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+  .buttons button:disabled { opacity: .5; cursor: default; }
   .primary { border: 0; background: var(--accent); color: #fff; }
   .secondary { border: 1px solid var(--line); background: none; color: var(--fg); }
   #msg:empty { display: none; }
+  .cal { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; margin: 12px 0 8px; }
+  #sphere {
+    width: 240px; max-width: 100%; aspect-ratio: 1; height: auto; touch-action: none; cursor: grab;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+  }
+  .cal-info { flex: 1; min-width: 180px; }
+  .cal-info .buttons { margin-top: 8px; }
+  .bar { height: 8px; margin: 6px 0; overflow: hidden; background: var(--line); border-radius: 4px; }
+  .bar > div { width: 0; height: 100%; background: var(--accent); transition: width .3s; }
+  /* Wide screens: Position and Magnetometer side by side, equally tall. */
+  @media (min-width: 900px) {
+    main { max-width: 1120px; }
+    #panel-gnss { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    #panel-gnss > section { margin-bottom: 0; }
+    #panel-wifi { max-width: 560px; margin: 0 auto; }
+  }
 </style>
 </head>
 <body>
@@ -88,7 +105,21 @@
         <tr><th>Magnitude</th><td id="mb">—</td></tr>
         <tr><th>Heading</th><td id="mh">—</td></tr>
       </table>
-      <p class="note">Raw sensor axes, uncalibrated. The heading is atan2(Y, X), valid only with the module held flat.</p>
+      <p class="note" id="mag-note"></p>
+      <div class="cal" id="cal" hidden>
+        <canvas id="sphere" width="240" height="240" role="img"
+                aria-label="Magnetometer calibration readings and the current field in 3D"></canvas>
+        <div class="cal-info">
+          <p class="status" id="cal-status"></p>
+          <div class="bar" id="cal-barbox" hidden><div id="cal-bar"></div></div>
+          <p class="note" id="cal-hint"></p>
+          <div class="buttons">
+            <button class="primary" type="button" id="cal-start">Calibrate</button>
+            <button class="secondary" type="button" id="cal-fresh" hidden>Reset and calibrate</button>
+            <button class="secondary" type="button" id="cal-stop" hidden>Stop</button>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -100,6 +131,7 @@
         <tr><th>Address</th><td id="w-ip">—</td></tr>
         <tr><th>Access point</th><td id="w-ap">—</td></tr>
         <tr><th>Hostname</th><td id="w-host">—</td></tr>
+        <tr><th>Device</th><td id="w-sys">—</td></tr>
       </table>
     </section>
     <section>
@@ -133,11 +165,11 @@ function selectTab(name) {
   $('panel-gnss').hidden = name !== 'gnss';
   $('panel-wifi').hidden = name !== 'wifi';
   history.replaceState(null, '', name === 'gnss' ? location.pathname : '#' + name);
+  if (view.cal && view.cal.state === 'running') animate(); else draw();
 }
 for (const b of document.querySelectorAll('[role=tab]')) {
   b.onclick = () => selectTab(b.dataset.tab);
 }
-selectTab(location.hash === '#wifi' ? 'wifi' : 'gnss');
 
 const num = (v, digits, unit = '') => v == null ? DASH : v.toFixed(digits) + unit;
 const coord = (v, pos, neg) => v == null ? DASH : `${Math.abs(v).toFixed(7)}° ${v < 0 ? neg : pos}`;
@@ -175,12 +207,15 @@ function renderMag(m) {
   } else {
     status(el, m.chip, 'ok');
   }
+  $('cal').hidden = !m.chip;
   const ok = m.x != null;
   $('mx').textContent = num(m.x, 2, ' µT');
   $('my').textContent = num(m.y, 2, ' µT');
   $('mz').textContent = num(m.z, 2, ' µT');
   $('mb').textContent = ok ? num(Math.hypot(m.x, m.y, m.z), 2, ' µT') : DASH;
   $('mh').textContent = ok ? num((Math.atan2(m.y, m.x) * 180 / Math.PI + 360) % 360, 1, '°') : DASH;
+  $('mag-note').textContent = (m.calibrated ? 'Calibrated (offsets removed), sensor axes.' : 'Raw sensor axes, uncalibrated.') +
+    ' The heading is atan2(Y, X), valid only with the module held flat.';
 }
 
 function renderWifi(w) {
@@ -192,8 +227,20 @@ function renderWifi(w) {
   $('w-ap').textContent = w.ap ? `On · "${w.ap_ssid}", open · 192.168.4.1` : 'Off';
   $('w-host').textContent = w.hostname;
   $('forget').hidden = !w.sta_saved;
+  // Pre-fill the network name once; never overwrite what's being typed.
+  const ssid = $('ssid');
+  if (!ssid.dataset.filled && w.sta_ssid && !ssid.value && document.activeElement !== ssid) {
+    ssid.value = w.sta_ssid;
+    ssid.dataset.filled = '1';
+  }
   $('wifi-note').textContent = `Saving restarts the device. If it can't connect within ${w.fallback_s} s, ` +
     `the open access point "${w.ap_ssid}" comes up.`;
+}
+
+function renderSystem(sys) {
+  const t = sys.uptime_s;
+  const up = t < 120 ? `${t} s` : t < 7200 ? `${Math.floor(t / 60)} min` : `${Math.floor(t / 3600)} h ${Math.floor(t / 60) % 60} min`;
+  $('w-sys').textContent = `Up ${up} · last reset: ${sys.reset}`;
 }
 
 let hostname = '';
@@ -206,21 +253,22 @@ async function poll() {
     renderGnss(s.gnss);
     renderMag(s.mag);
     renderWifi(s.wifi);
+    renderSystem(s.system);
     $('offline').hidden = true;
   } catch {
     $('offline').hidden = false;
   }
   setTimeout(poll, 1000);
 }
-poll();
 
 async function post(url, body, done) {
   const msg = $('msg');
   status(msg, 'Saving…', '');
   try {
-    const r = await fetch(url, {method: 'POST', body});
-    const j = await r.json();
-    if (!j.ok) throw new Error(j.error || r.statusText);
+    const r = await fetch(url, {method: 'POST', body, signal: AbortSignal.timeout(5000)});
+    // An error from the server itself comes back as HTML, not JSON.
+    const j = (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
+    if (!j || !j.ok) throw new Error((j && j.error) || `the device answered ${r.status}`);
     status(msg, done, 'ok');
   } catch (err) {
     status(msg, 'Failed: ' + err.message, 'bad');
@@ -230,14 +278,258 @@ async function post(url, body, done) {
 $('wifi-form').onsubmit = e => {
   e.preventDefault();
   const ssid = $('ssid').value;
+  // The name is pre-filled, so an untouched form would otherwise save the current
+  // network as an open one and the device would no longer be able to join it.
+  if (!$('password').value &&
+      !confirm(`Save "${ssid}" with no password? Only do this if the network really is open.`)) {
+    return;
+  }
   post('/api/wifi', new URLSearchParams(new FormData(e.target)),
-       `Saved. Restarting to join "${ssid}"; once it's on, open http://${hostname}/ from that network.`);
+       `Saved. Restarting to join "${ssid}"; once it's on, open http://${hostname || location.host}/ from that network.`);
 };
 
 $('forget').onclick = () => {
   if (!confirm('Forget this network? The device restarts and uses the built-in network, or its access point.')) return;
   post('/api/wifi/forget', null, 'Forgotten. Restarting…');
 };
+
+// ---- Magnetometer plot and calibration ----
+// The firmware runs the calibration (see CALIBRATION.md). The plot shows its
+// readings as dots and the current field as an arrow from the fitted centre.
+const view = {cal: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0, fg: '',
+              yaw: 0.8, pitch: 0.45, drag: null, animating: false};
+
+const quantile = (sorted, q) => sorted[Math.floor(q * (sorted.length - 1))];
+
+// Colour by height: blue #1f5fbf (down), green #1a9e6a, yellow #d9a400 (up).
+const PALETTE = Array.from({length: 21}, (_, i) => {
+  const t = i / 20;
+  const [a, b, f] = t < 0.5 ? [[31, 95, 191], [26, 158, 106], t * 2] : [[26, 158, 106], [217, 164, 0], t * 2 - 1];
+  return `rgb(${a.map((v, k) => Math.round(v + (b[k] - v) * f)).join(',')})`;
+});
+const colourOf = d => PALETTE[Math.round((d[2] / (Math.hypot(...d) || 1) + 1) * 10)];
+
+function drawArrow(g, from, to, colour) {
+  const dx = to[0] - from[0], dy = to[1] - from[1], len = Math.hypot(dx, dy);
+  if (len < 1) return;
+  const ux = dx / len, uy = dy / len, head = Math.min(12, len * 0.4);
+  const bx = to[0] - ux * head, by = to[1] - uy * head;
+  g.strokeStyle = g.fillStyle = colour;
+  g.lineWidth = 3;
+  g.beginPath(); g.moveTo(from[0], from[1]); g.lineTo(bx, by); g.stroke();
+  g.beginPath();
+  g.moveTo(to[0], to[1]);
+  g.lineTo(bx - uy * head * 0.5, by + ux * head * 0.5);
+  g.lineTo(bx + uy * head * 0.5, by - ux * head * 0.5);
+  g.closePath();
+  g.fill();
+}
+
+function draw() {
+  const cv = $('sphere'), c = view.cal;
+  const size = cv.clientWidth, dpr = window.devicePixelRatio || 1;
+  if (!size || !c) return;
+  if (cv.width !== Math.round(size * dpr)) cv.width = cv.height = Math.round(size * dpr);
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, size, size);
+
+  const running = c.state === 'running';
+  const centre = running || !c.cal ? c.centre : c.cal.offset;
+  const rel = p => [p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]];
+  // view.radius is recomputed only when the readings change, not per frame.
+  let r = view.radius;
+  if (view.live) r = Math.max(r, Math.hypot(...rel(view.live)));
+  if (!r) return;
+
+  const cy = Math.cos(view.yaw), sy = Math.sin(view.yaw), cp = Math.cos(view.pitch), sp = Math.sin(view.pitch);
+  const k = (size / 2 - 12) / (r * 1.15);
+  // Turn about Z (yaw), then look down by pitch, Z up on screen. Gives [x, y, depth].
+  const project = d => {
+    const x = d[0] * cy - d[1] * sy, y = d[0] * sy + d[1] * cy;
+    return [size / 2 + x * k, size / 2 - (d[2] * cp + y * sp) * k, y * cp - d[2] * sp];
+  };
+  const o = project([0, 0, 0]), len = r * 1.1;
+  g.lineWidth = 1.5;
+  g.font = '11px system-ui, sans-serif';
+  for (const [label, colour, v] of [['X', '#d33', [len, 0, 0]], ['Y', '#2a2', [0, len, 0]], ['Z', '#36c', [0, 0, len]]]) {
+    const e = project(v);
+    g.strokeStyle = g.fillStyle = colour;
+    g.beginPath(); g.moveTo(o[0], o[1]); g.lineTo(e[0], e[1]); g.stroke();
+    g.fillText(label, e[0] + 3, e[1] - 3);
+  }
+  // Dots are fainter outside calibration, so the arrow stands out; far side dimmer still.
+  for (const p of c.points) {
+    const d = rel(p), s = project(d);
+    g.globalAlpha = (s[2] > 0 ? 0.35 : 1) * (running ? 0.9 : 0.5);
+    g.fillStyle = colourOf(d);
+    g.fillRect(s[0] - 1.5, s[1] - 1.5, 3, 3);
+  }
+  g.globalAlpha = 1;
+  if (view.live) {
+    const d = rel(view.live), s = project(d);
+    if (running) {  // where the module points now, among the dots being collected
+      g.strokeStyle = view.fg || (view.fg = getComputedStyle(document.body).color);
+      g.lineWidth = 1.5;
+      g.beginPath(); g.arc(s[0], s[1], 5, 0, 2 * Math.PI); g.stroke();
+    } else {
+      drawArrow(g, o, s, colourOf(d));
+    }
+  }
+}
+
+function frame() {
+  const running = view.cal && view.cal.state === 'running';
+  // A hidden tab or panel leaves the canvas zero-wide: stop until it's shown again.
+  if ((!running && !view.drag) || document.hidden || !$('sphere').clientWidth) {
+    view.animating = false;
+    draw();
+    return;
+  }
+  if (!view.drag) view.yaw += 0.005;
+  draw();
+  requestAnimationFrame(frame);
+}
+
+function animate() {
+  if (!view.animating) {
+    view.animating = true;
+    requestAnimationFrame(frame);
+  }
+}
+
+function renderCal() {
+  const c = view.cal, running = c.state === 'running', saved = c.points.length > 0;
+  const pct = Math.round(c.progress * 100);
+  if (running) view.calError = '';  // the last request clearly went through
+  $('cal-start').hidden = running;
+  $('cal-fresh').hidden = running || !saved;
+  $('cal-stop').hidden = !running;
+  $('cal-start').textContent = !saved ? 'Calibrate' : c.cal ? 'Calibrate again' : 'Continue calibration';
+  $('cal-barbox').hidden = !running && (c.cal || !saved);
+  $('cal-bar').style.width = pct + '%';
+  const missing = c.missing.map(a => a.replace('-', '−'));
+  const kept = (c.cal ? 'The previous calibration stays in use. ' : '') +
+    'The readings are saved; Continue calibration picks up from here.';
+  const summary = c.cal ? `radius ${c.cal.radius.toFixed(1)} µT, fit ${(c.cal.rms * 100).toFixed(1)} %` : '';
+  let text, cls, hint;
+  if (running) {
+    text = `Calibrating · ${pct} %`;
+    cls = '';
+    hint = `${c.points.length} readings kept, ${Math.round(c.coverage * 100)} % of directions covered (target 90 %). ` +
+      'Rotate the module slowly through every orientation' +
+      (missing.length ? `; not reached yet: ${missing.join(', ')}.` : '.');
+  } else if (c.state === 'failed') {
+    [text, cls, hint] = [`Calibration failed: ${c.reason || 'unknown reason'}`, 'bad', kept];
+  } else if (c.state === 'stopped') {
+    [text, cls, hint] = [`Stopped at ${pct} %`, 'warn', kept];
+  } else if (c.cal) {
+    text = `${c.state === 'done' ? 'Calibration saved' : 'Calibrated'} · ${summary}`;
+    cls = 'ok';
+    hint = 'The arrow is the current field; the dots are the calibration readings. ' +
+      'Calibrate again continues from them; Reset and calibrate discards them. Offsets only for now: the full 9-parameter fit follows.';
+  } else if (saved) {
+    // Not "progress": completing also needs fresh readings, which this doesn't count.
+    [text, cls, hint] = [`Not calibrated · ${Math.round(c.coverage * 100)} % of directions covered`, 'warn',
+      'Continue calibration picks up from the saved readings; Reset and calibrate discards them.'];
+  } else {
+    [text, cls, hint] = ['Not calibrated', 'warn', 'Press Calibrate, then rotate the module slowly through every orientation.'];
+  }
+  if (view.calError) {
+    [text, cls] = [view.calError, 'bad'];
+  }
+  status($('cal-status'), text, cls);
+  $('cal-hint').textContent = hint;
+  if (running) animate(); else if (!view.animating) draw();
+}
+
+// The 0.98 quantile of the readings' distance from the centre, for the plot scale.
+function calRadius(c) {
+  const centre = c.state === 'running' || !c.cal ? c.centre : c.cal.offset;
+  const radii = c.points.map(p => Math.hypot(p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]))
+    .sort((a, b) => a - b);
+  return radii.length ? quantile(radii, 0.98) : c.cal ? c.cal.radius : 0;
+}
+
+async function pollCal() {
+  clearTimeout(view.calTimer);
+  let ok = false;
+  try {
+    const r = await fetch('/api/cal', {cache: 'no-store', signal: AbortSignal.timeout(4000)});
+    view.cal = await r.json();
+    view.radius = calRadius(view.cal);
+    renderCal();
+    ok = true;
+  } catch {
+    // the status poll already shows when the device is unreachable
+  }
+  view.calTimer = setTimeout(pollCal, !ok || view.cal.state === 'running' ? 1000 : 10000);
+}
+
+// Only the latest reading matters here, so each request skips to the newest.
+// Idle unless the plot is actually on screen: this runs on phones.
+async function pollLive() {
+  const showing = !document.hidden && !$('panel-gnss').hidden && !$('cal').hidden;
+  if (showing) {
+    try {
+      const r = await fetch(`/api/mag/samples?since=${view.since}`, {cache: 'no-store', signal: AbortSignal.timeout(3000)});
+      const j = await r.json();
+      if (!view.skip && j.seq >= view.since && j.samples.length) {
+        const [, , x, y, z] = j.samples[j.samples.length - 1];
+        view.live = [x, y, z].map(v => v * j.ut_per_count);
+        if (!view.animating) draw();
+      }
+      view.since = j.seq;
+      view.skip = false;
+    } catch {
+      // shown by the status poll
+    }
+  }
+  setTimeout(pollLive, showing ? 500 : 2000);
+}
+
+async function calPost(url) {
+  view.calError = '';
+  try {
+    const r = await fetch(url, {method: 'POST', signal: AbortSignal.timeout(5000)});
+    const j = (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
+    if (!j || !j.ok) view.calError = (j && j.error) || `The device refused the request (${r.status})`;
+  } catch {
+    view.calError = "The device didn't answer";
+  }
+  pollCal();  // renderCal shows view.calError until the session starts
+}
+$('cal-start').onclick = () => calPost('/api/cal/start');
+$('cal-fresh').onclick = () => {
+  if (confirm('Discard the saved readings and start over? The current calibration stays in use until the new one completes.')) {
+    calPost('/api/cal/start?fresh=1');
+  }
+};
+$('cal-stop').onclick = () => calPost('/api/cal/stop');
+
+const sphere = $('sphere');
+sphere.onpointerdown = e => {
+  view.drag = [e.clientX, e.clientY, view.yaw, view.pitch];
+  sphere.setPointerCapture(e.pointerId);
+  animate();
+};
+sphere.onpointermove = e => {
+  if (!view.drag) return;
+  const [x0, y0, yaw0, pitch0] = view.drag;
+  view.yaw = yaw0 + (e.clientX - x0) * 0.01;
+  view.pitch = Math.max(-1.5, Math.min(1.5, pitch0 + (e.clientY - y0) * 0.01));
+};
+sphere.onpointerup = sphere.onpointercancel = sphere.onlostpointercapture = () => { view.drag = null; };
+
+addEventListener('hashchange', () => selectTab(location.hash === '#wifi' ? 'wifi' : 'gnss'));
+addEventListener('visibilitychange', () => {
+  if (!document.hidden && view.cal && view.cal.state === 'running') animate();
+});
+
+selectTab(location.hash === '#wifi' ? 'wifi' : 'gnss');
+poll();
+pollCal();
+pollLive();
 </script>
 </body>
 </html>

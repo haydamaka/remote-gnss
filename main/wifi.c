@@ -103,19 +103,31 @@ static esp_err_t ap_enable(void)
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     switch (id) {
+    // The timers only exist when a station network is configured, and only then
+    // can these two events arrive.
     case WIFI_EVENT_STA_START:
+        if (!sta_configured) {
+            break;
+        }
         ESP_LOGI(TAG, "joining \"%s\" (%s)", sta_ssid, sta_saved ? "set from the web page" : "built in");
         esp_wifi_connect();
-        xTimerStart(fallback_timer, 0);
+        if (xTimerStart(fallback_timer, 0) != pdPASS) {
+            ESP_LOGW(TAG, "could not arm the access point fallback");
+        }
         break;
     case WIFI_EVENT_STA_DISCONNECTED: {
+        if (!sta_configured) {
+            break;
+        }
         wifi_event_sta_disconnected_t *e = data;
         int delay_ms = ap_active() ? RECONNECT_WITH_AP_MS : RECONNECT_MS;
         ESP_LOGW(TAG, "not connected to \"%s\" (reason %d), retrying in %d s", sta_ssid, e->reason, delay_ms / 1000);
         sta_connected = false;
-        xTimerChangePeriod(reconnect_timer, pdMS_TO_TICKS(delay_ms), 0);
-        if (!ap_active() && !xTimerIsTimerActive(fallback_timer)) {
-            xTimerStart(fallback_timer, 0);
+        if (xTimerChangePeriod(reconnect_timer, pdMS_TO_TICKS(delay_ms), 0) != pdPASS) {
+            ESP_LOGE(TAG, "could not schedule the retry");
+        }
+        if (!ap_active() && !xTimerIsTimerActive(fallback_timer) && xTimerStart(fallback_timer, 0) != pdPASS) {
+            ESP_LOGW(TAG, "could not arm the access point fallback");
         }
         break;
     }

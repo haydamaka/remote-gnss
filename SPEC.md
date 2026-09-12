@@ -38,7 +38,7 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
 
 - **Station first.** The device joins a WiFi network when it has credentials:
   1. the network set from the web page (saved in NVS), or else
-  2. the built-in one: thcoe macros `WIFI_STA_SSID` and `WIFI_STA_PASSWORD` in
+  2. the built-in one: the macros `WIFI_STA_SSID` and `WIFI_STA_PASSWORD` in
      `main/wifi_credentials.h`. That file is kept out of git; see
      `main/wifi_credentials.h.example`.
 - **Soft access point.** An open access point (default name `remote-gnss`, no
@@ -59,11 +59,37 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
   - **WiFi**: connection status; set the network to join; forget a network set
     from the page, which falls back to the built-in one.
 
-## Magnetometer calibration (requested, not implemented)
+## External GNSS interfaces
+
+- The device should expose the GNSS stream over common interfaces, so a PC or
+  an Android phone can use it as a wireless GPS.
+- **TCP and Bluetooth** are the wanted connections. Tested with ready-to-use
+  client programs on Linux and Android where possible, rather than purpose-built
+  ones.
+- Plan: [EXTERNAL-GNSS.md](EXTERNAL-GNSS.md). Note that the ESP32-C3 has no
+  Bluetooth Classic (no SPP): Bluetooth there means BLE with the Nordic UART
+  Service.
+
+## Magnetometer calibration (interim: offsets only)
 
 - Calibrate the hard- and soft-iron distortion iteratively: keep taking
   readings, recompute the centre and scaling, exclude outliers, and continue
   until the readings form a "good" sphere. Continuous or in iterations.
+- Our own algorithm, not based on ArduPilot's. It should make re-calibration
+  easy, and the user should always see how well the calibration is going.
+- Started with a button on the web page. It completes on its own once good
+  enough, or is interrupted with a Stop button.
+- While calibrating, the GNSS page shows a small 3D plot of the magnetometer
+  points (the dotted sphere).
+- Fit 9 parameters: 3 offsets plus a symmetric 3×3 soft-iron matrix.
+- A completed calibration is saved to NVS and loaded again at start.
+- The calibration readings are saved too, so a later calibration continues
+  from them instead of starting from nothing.
+- Outside calibration, the same plot shows the current magnetometer vector as
+  an arrow (not a point), in the same colour scheme as the points.
+- World Magnetic Model: a later phase.
+- Before implementing it in firmware: record real readings and try the
+  algorithm offline.
 - Algorithm proposal: [CALIBRATION.md](CALIBRATION.md).
 
 ## Firmware modules
@@ -75,6 +101,7 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
 | `webserver.c`    | HTTP server, embedded page, JSON API                    |
 | `gnss.c`         | Reads the receiver on UART1; NMEA parsing with minmea   |
 | `magnetometer.c` | Reads the QMC5883P/L or IST8310 on I2C                  |
+| `mag_cal.c`      | Calibration sessions, direction cells, fit, NVS storage |
 
 minmea (https://github.com/kosma/minmea) is vendored in `components/minmea`.
 
@@ -91,5 +118,5 @@ page with text readings.
   resolvers asking for `gnss` + `haydamaka` + `local` reject. Using
   `gnss-haydamaka.local` for now; the two-label name would need a patched
   mDNS component.
-- The magnetometer readings are raw sensor axes, uncalibrated. Their
-  orientation relative to the module isn't established yet.
+- The orientation of the magnetometer's axes relative to the module isn't
+  established yet. The horizontal plane looks like XY, from a flat spin.

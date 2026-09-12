@@ -1,6 +1,13 @@
 # remote-gnss
 
-ESP-IDF v5.5 firmware for ESP32-C3. See [SPEC.md](SPEC.md) for what it does.
+ESP-IDF v5.5 firmware for ESP32-C3. See [SPEC.md](SPEC.md) for what it does and
+[CALIBRATION.md](CALIBRATION.md) for the magnetometer calibration and
+[EXTERNAL-GNSS.md](EXTERNAL-GNSS.md) for the planned TCP/BLE GNSS output.
+
+`tools/` holds the offline calibration work: `mag_record.py` records the
+device's magnetometer readings to CSV (standard library only), and
+`mag_calibrate.py` is the reference implementation of the algorithm and needs
+numpy (plus matplotlib for `--plot`).
 
 ## WiFi credentials
 

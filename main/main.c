@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 
 #include "gnss.h"
+#include "mag_cal.h"
 #include "magnetometer.h"
 #include "mdns_service.h"
 #include "webserver.h"
@@ -34,10 +35,14 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     ESP_ERROR_CHECK(wifi_start());
-    ESP_ERROR_CHECK(mdns_service_start());
-    ESP_ERROR_CHECK(webserver_start());
 
     // The web page is still useful with a sensor missing, so these aren't fatal.
+    // They come first: the server must not serve a request before the modules it
+    // asks for are ready, and probing a stuck I2C bus can take a while.
     ESP_ERROR_CHECK_WITHOUT_ABORT(gnss_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(magnetometer_start());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mag_cal_init());
+
+    ESP_ERROR_CHECK(mdns_service_start());
+    ESP_ERROR_CHECK(webserver_start());
 }

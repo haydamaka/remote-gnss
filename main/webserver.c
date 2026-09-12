@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 
 #include "gnss.h"
+#include "mag_cal.h"
 #include "magnetometer.h"
 #include "wifi.h"
 
@@ -113,6 +114,18 @@ static void json_str(json_t *j, const char *key, const char *s)
     json_append(j, "\"");
 }
 
+// Sends a built document, or 500 if it didn't fit its buffer.
+static esp_err_t send_json(httpd_req_t *req, const json_t *j, const char *what)
+{
+    if (j->len >= j->size) {
+        ESP_LOGE(TAG, "%s needs %u bytes, buffer is %u", what, (unsigned)j->len + 1, (unsigned)j->size);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "response too large");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, j->buf, j->len);
+}
+
 // Milliseconds since an esp_timer timestamp; NaN if it was never set.
 static double age_ms(int64_t us)
 {
@@ -131,7 +144,7 @@ static esp_err_t reply(httpd_req_t *req, const char *status, const char *error)
     json_close(&j);
     httpd_resp_set_status(req, status);
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, buf, j.len);
+    return httpd_resp_send(req, buf, j.len < j.size ? j.len : j.size - 1);
 }
 
 static esp_err_t read_body(httpd_req_t *req, char *buf, size_t size)
@@ -140,9 +153,13 @@ static esp_err_t read_body(httpd_req_t *req, char *buf, size_t size)
         return ESP_ERR_INVALID_SIZE;
     }
     size_t got = 0;
+    int timeouts = 0;
     while (got < req->content_len) {
         int n = httpd_req_recv(req, buf + got, req->content_len - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 3) {
+                return ESP_ERR_TIMEOUT;  // a silent client must not hold the only server task
+            }
             continue;
         }
         if (n <= 0) {
@@ -179,6 +196,23 @@ static void restart_soon(void)
     esp_restart();
 }
 
+static const char *reset_reason(void)
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON: return "power-on";
+    case ESP_RST_SW: return "restart by the firmware";
+    case ESP_RST_PANIC: return "crash";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT: return "watchdog";
+    case ESP_RST_BROWNOUT: return "brownout (power dip)";
+    case ESP_RST_USB: return "USB reset";
+    case ESP_RST_EXT: return "reset pin";
+    case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
+    default: return "unknown";
+    }
+}
+
 static esp_err_t index_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -213,12 +247,15 @@ static esp_err_t status_get(httpd_req_t *req)
     json_str(&j, "utc", g.utc[0] ? g.utc : NULL);
     json_close(&j);
 
+    float field[3];
+    bool calibrated = mag_cal_apply(m.field_ut, field);
     json_open(&j, "mag");
     json_str(&j, "chip", m.chip);
     json_num(&j, "age_ms", age_ms(m.updated_us), 0);
-    json_num(&j, "x", m.updated_us ? m.field_ut[0] : NAN, 2);
-    json_num(&j, "y", m.updated_us ? m.field_ut[1] : NAN, 2);
-    json_num(&j, "z", m.updated_us ? m.field_ut[2] : NAN, 2);
+    json_bool(&j, "calibrated", calibrated);
+    json_num(&j, "x", m.updated_us ? field[0] : NAN, 2);
+    json_num(&j, "y", m.updated_us ? field[1] : NAN, 2);
+    json_num(&j, "z", m.updated_us ? field[2] : NAN, 2);
     json_close(&j);
 
     json_open(&j, "wifi");
@@ -234,13 +271,133 @@ static esp_err_t status_get(httpd_req_t *req)
     json_int(&j, "fallback_s", CONFIG_RGNSS_STA_FALLBACK_S);
     json_close(&j);
 
+    json_open(&j, "system");
+    json_int(&j, "uptime_s", esp_timer_get_time() / 1000000);
+    json_str(&j, "reset", reset_reason());
     json_close(&j);
-    if (j.len >= j.size) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status too large");
+
+    json_close(&j);
+    return send_json(req, &j, "status");
+}
+
+#define MAG_SAMPLES_PER_REPLY 80
+
+static esp_err_t mag_samples_get(httpd_req_t *req)
+{
+    // One httpd task serves every request, so these can be static.
+    static magnetometer_sample_t samples[MAG_SAMPLES_PER_REPLY];
+    static char buf[4096];
+
+    uint32_t since = 0;
+    char query[64];  // a short buffer would turn extra parameters into "no since at all"
+    char value[16];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "since", value, sizeof(value)) == ESP_OK) {
+        since = strtoul(value, NULL, 10);
     }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    return httpd_resp_send(req, buf, j.len);
+    uint32_t latest;
+    size_t n = magnetometer_samples_since(since, samples, MAG_SAMPLES_PER_REPLY, &latest);
+    magnetometer_data_t m;
+    magnetometer_get(&m);
+
+    json_t j = {.buf = buf, .size = sizeof(buf)};
+    json_open(&j, NULL);
+    json_str(&j, "chip", m.chip);
+    json_num(&j, "ut_per_count", magnetometer_ut_per_count(), 6);
+    json_int(&j, "seq", latest);
+    json_bool(&j, "more", n > 0 && samples[n - 1].seq < latest);
+    json_key(&j, "samples");
+    json_append(&j, "[");
+    for (size_t i = 0; i < n; i++) {
+        json_append(&j, "%s[%lu,%lu,%d,%d,%d]", i ? "," : "", (unsigned long)samples[i].seq,
+                    (unsigned long)samples[i].t_ms, samples[i].raw[0], samples[i].raw[1], samples[i].raw[2]);
+    }
+    json_append(&j, "]");
+    json_close(&j);
+    return send_json(req, &j, "samples");
+}
+
+static void json_floats(json_t *j, const char *key, const float *v, size_t n, int decimals)
+{
+    json_key(j, key);
+    json_append(j, "[");
+    for (size_t i = 0; i < n; i++) {
+        json_append(j, "%s", i ? "," : "");
+        if (isfinite(v[i])) {
+            json_append(j, "%.*f", decimals, v[i]);
+        } else {
+            json_append(j, "null");  // "nan" would not be JSON
+        }
+    }
+    json_append(j, "]");
+}
+
+static esp_err_t cal_get(httpd_req_t *req)
+{
+    static const char *const STATES[] = {"idle", "running", "done", "stopped", "failed"};
+    static const char *const CAPS[] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
+    // One httpd task serves every request, so these can be static.
+    static float points[MAG_CAL_MAX_POINTS][3];
+    static char buf[12288];
+
+    mag_cal_status_t s;
+    mag_cal_get_status(&s);
+    size_t n = mag_cal_get_points(points, MAG_CAL_MAX_POINTS);
+
+    json_t j = {.buf = buf, .size = sizeof(buf)};
+    json_open(&j, NULL);
+    json_str(&j, "state", STATES[s.state]);
+    json_str(&j, "reason", s.reason[0] ? s.reason : NULL);
+    json_num(&j, "progress", s.progress, 3);
+    json_num(&j, "coverage", s.coverage, 3);
+    json_key(&j, "missing");
+    json_append(&j, "[");
+    for (int k = 0, first = 1; k < 6; k++) {
+        if (s.missing & (1 << k)) {
+            json_append(&j, "%s\"%s\"", first ? "" : ",", CAPS[k]);
+            first = 0;
+        }
+    }
+    json_append(&j, "]");
+    json_floats(&j, "centre", s.centre, 3, 2);
+    if (s.params.valid) {
+        json_open(&j, "cal");
+        json_floats(&j, "offset", s.params.offset, 3, 2);
+        json_floats(&j, "matrix", s.params.matrix, 9, 4);
+        json_num(&j, "radius", s.params.radius, 2);
+        json_num(&j, "rms", s.params.fit_rms, 4);
+        json_int(&j, "points", s.params.points);
+        json_close(&j);
+    } else {
+        json_str(&j, "cal", NULL);
+    }
+    json_key(&j, "points");
+    json_append(&j, "[");
+    for (size_t i = 0; i < n; i++) {
+        json_append(&j, "%s[%.1f,%.1f,%.1f]", i ? "," : "", points[i][0], points[i][1], points[i][2]);
+    }
+    json_append(&j, "]");
+    json_close(&j);
+    return send_json(req, &j, "calibration");
+}
+
+// ?fresh=1 discards the saved readings; otherwise the session continues from them.
+static esp_err_t cal_start_post(httpd_req_t *req)
+{
+    char query[64];  // see mag_samples_get: truncation would silently mean "not fresh"
+    char value[4];
+    bool fresh = httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+                 httpd_query_key_value(query, "fresh", value, sizeof(value)) == ESP_OK && value[0] == '1';
+    if (mag_cal_begin(fresh) != ESP_OK) {
+        return reply(req, HTTPD_400, "No magnetometer detected");
+    }
+    return reply(req, HTTPD_200, NULL);
+}
+
+static esp_err_t cal_stop_post(httpd_req_t *req)
+{
+    mag_cal_stop();
+    return reply(req, HTTPD_200, NULL);
 }
 
 static esp_err_t wifi_post(httpd_req_t *req)
@@ -293,11 +450,16 @@ esp_err_t webserver_start(void)
     cfg.server_port = CONFIG_RGNSS_HTTP_PORT;
     cfg.stack_size = 6144;
     cfg.lru_purge_enable = true;
+    cfg.max_uri_handlers = 12;
     ESP_RETURN_ON_ERROR(httpd_start(&server, &cfg), TAG, "start");
 
     static const httpd_uri_t uris[] = {
         {.uri = "/", .method = HTTP_GET, .handler = index_get},
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
+        {.uri = "/api/mag/samples", .method = HTTP_GET, .handler = mag_samples_get},
+        {.uri = "/api/cal", .method = HTTP_GET, .handler = cal_get},
+        {.uri = "/api/cal/start", .method = HTTP_POST, .handler = cal_start_post},
+        {.uri = "/api/cal/stop", .method = HTTP_POST, .handler = cal_stop_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
         {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = forget_post},
     };

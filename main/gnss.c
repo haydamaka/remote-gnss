@@ -19,7 +19,8 @@
 
 static const char *TAG = "gnss";
 
-// Written only by the reader task; others copy it out under the lock.
+// Written only by the reader task, which may therefore read it unlocked;
+// everyone else copies it out under the lock.
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static gnss_data_t data;
 
@@ -70,7 +71,8 @@ static void handle_gga(const char *line)
 static void handle_rmc(const char *line)
 {
     struct minmea_sentence_rmc f;
-    if (!minmea_parse_rmc(&f, line)) {
+    // An invalid RMC can still carry stale time and speed, so ignore it.
+    if (!minmea_parse_rmc(&f, line) || !f.valid) {
         return;
     }
     float speed_kmh = minmea_tofloat(&f.speed) * 1.852f;
@@ -113,7 +115,7 @@ static void handle_sentence(const char *line)
 // frames; any garbage they leave in a line fails minmea's checksum.
 static void reader_task(void *arg)
 {
-    static char line[128];
+    char line[128];  // NMEA allows 82; minmea takes up to MINMEA_MAX_SENTENCE_LENGTH
     size_t len = 0;
     uint8_t buf[128];
     int64_t last_rx = esp_timer_get_time();

@@ -5,6 +5,7 @@ dependencies.lock
 sdkconfig
 sdkconfig.old
 main/wifi_credentials.h
+__pycache__/
 
 .idea/*
 !.idea/cmake.xml
