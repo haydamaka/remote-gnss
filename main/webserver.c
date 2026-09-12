@@ -273,6 +273,21 @@ static esp_err_t status_get(httpd_req_t *req)
     json_num(&j, "y", m.updated_us ? field[1] : NAN, 2);
     json_num(&j, "z", m.updated_us ? field[2] : NAN, 2);
     json_num(&j, "heading_offset", magnetometer_heading_offset(), 1);
+    // What driving has taught the compass, but only once the user has asked for
+    // it to be used. The page applies it the same way it applies the manual
+    // offset, to both the readout and the card.
+    bearing_status_t bs;
+    bearing_get(&bs);
+    if (bs.applying && bs.have) {
+        json_key(&j, "heading_coef");
+        json_append(&j, "[");
+        for (int i = 0; i < 5; i++) {
+            json_append(&j, "%s%.3f", i ? "," : "", bs.result.coef[i]);
+        }
+        json_append(&j, "]");
+    } else {
+        json_str(&j, "heading_coef", NULL);
+    }
     json_close(&j);
 
     json_open(&j, "wifi");
@@ -475,6 +490,11 @@ static esp_err_t cal_points_post(httpd_req_t *req)
 {
     // Parsed straight into the calibration scratch: a 4.8 kB buffer of our own
     // would sit here for the life of the device to serve an occasional upload.
+    // Bounded so a client cannot hold the calibration scratch for minutes:
+    // the 400 readings the buffer holds are about 10 kB of CSV.
+    if (req->content_len > 64 * 1024) {
+        return reply(req, HTTPD_400, "That file is far too large to be readings");
+    }
     size_t max = 0;
     float (*pts)[3] = mag_cal_load_buffer(&max);
     if (!pts) {
@@ -499,6 +519,7 @@ static esp_err_t cal_points_post(httpd_req_t *req)
             mag_cal_load_abandon();
             return ESP_FAIL;
         }
+        timeouts = 0;  // it is moving again
         got += r;
         for (int i = 0; i < r; i++) {
             char ch = chunk[i];

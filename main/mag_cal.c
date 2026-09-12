@@ -17,7 +17,6 @@
 
 _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer readings than the buffer holds");
 
-#define LOAD_TIMEOUT_US (30 * 1000 * 1000)  // an upload that never finished
 #define NVS_NAMESPACE "magcal"
 // Version 2's "rough" byte became the quality, and its values still mean the
 // same thing (0 good, 1 rough), so stored calibrations survive the change.
@@ -123,7 +122,6 @@ static int16_t packed[MAG_CAL_MAX_POINTS][3];
 
 static bool fitting;        // a fit is using the scratch right now, off the lock
 static bool loading;        // an upload is parsing into it, off the lock
-static int64_t loading_since;
 static bool points_dirty;
 static uint32_t points_seq;  // bumped whenever the buffer changes, so the page can tell
 static bool params_dirty;
@@ -503,7 +501,7 @@ static void flush_nvs(void)
     sp.points = params.points;
     memcpy(sp.offset, params.offset, sizeof(sp.offset));
     memcpy(sp.matrix, params.matrix, sizeof(sp.matrix));
-    points_dirty = params_dirty = false;
+    points_dirty = params_dirty = false;  // restored below if the write fails
     last_save = esp_timer_get_time();
     xSemaphoreGive(lock);
 
@@ -528,12 +526,14 @@ static void flush_nvs(void)
         return;
     }
     ESP_LOGE(TAG, "save: %s", esp_err_to_name(err));
-    if (write_params) {  // the calibration isn't stored, so don't keep using it
-        xSemaphoreTake(lock, portMAX_DELAY);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    points_dirty = true;  // it never reached flash, so try again next time round
+    if (write_params) {   // the calibration isn't stored, so don't keep using it
+        params_dirty = true;
         params = params_before_save;
         fail("Could not save the calibration");
-        xSemaphoreGive(lock);
     }
+    xSemaphoreGive(lock);
 }
 
 static void load(void)
@@ -747,12 +747,12 @@ static void cal_task(void *arg)
             // Nothing is calibrating, so nothing owns the fit scratch. Checked
             // here rather than paired with each way a session can end, so that
             // adding another way out cannot leak it.
-            // An upload parsing into the scratch owns it too. Without this the
-            // buffer is freed under the web server mid-upload.
-            if (loading && esp_timer_get_time() - loading_since > LOAD_TIMEOUT_US) {
-                ESP_LOGW(TAG, "upload never finished; taking the buffer back");
-                loading = false;
-            }
+            // An upload parsing into the scratch owns it too. There is
+            // deliberately no timeout on that: memory cannot be taken back from
+            // a task that still holds the pointer, and a reclaim on a slow
+            // upload would free the block while the web server was writing into
+            // it. Every exit from the upload handler gives it back instead, and
+            // the body it reads is length-capped so it cannot run long.
             if (scratch && !fit_once && !fitting && !loading) {
                 scratch_release();
             }
@@ -868,7 +868,6 @@ float (*mag_cal_load_buffer(size_t *max))[3]
         buf = scratch->snapshot;
         *max = MAG_CAL_MAX_POINTS;
         loading = true;  // claims it until set_points or abandon
-        loading_since = esp_timer_get_time();
     }
     xSemaphoreGive(lock);
     return buf;

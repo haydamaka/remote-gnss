@@ -147,9 +147,16 @@ task parsing an upload into it**. Only the fit marked itself, so:
 
 Both are now closed by a `loading` flag that the upload holds: the release
 skips it, a fit refuses to start while it is set, and every exit from the
-upload handler gives it back. An upload that simply stops — a dropped
-connection — is reclaimed after 30 seconds, so a vanished client cannot pin the
-block for ever.
+upload handler gives it back.
+
+The first attempt at that also added a 30-second timeout, so a vanished client
+could not pin the block for ever — and that was the same bug again. A timeout
+cannot take memory back from a task that still holds the pointer: on a slow
+upload it cleared the flag and freed the block in the same lock hold while the
+web server was still writing into it. **Memory is released when its owner gives
+it back, never on a clock.** What bounds the hold instead is the request: the
+body is capped at 64 kB (400 readings are about 10 kB of CSV) and the stall
+counter ends a connection that stops making progress.
 
 ## Measured on the device (2026-09-12)
 
@@ -180,6 +187,7 @@ round trip through Save and Load restored all 355.
 | `magnetometer.c` `history[256]` | 4,096 | lower it again if the recorder's dropout tolerance is not wanted. |
 | `bearing.c` `st` | 3,036 | the learning state and the drive trace. Persistent by design; the trace is 1,920 of it and halves to one hour if needed. |
 | `mag_cal.c` `packed[400][3]` | 2,400 | the NVS staging buffer, shared between save and load. Needed whenever the readings are written or read. |
+| `mag_cal.c` `by_age[400]` | 800 | ordering scratch for the same save. |
 
 ## Two things deliberately not done
 
@@ -195,7 +203,10 @@ device is busiest.
 
 ## Rules
 
-- Regular operation allocates nothing. Static buffers, or stream it.
+- Regular operation allocates nothing from our code. Static buffers, or stream
+  it. (FreeRTOS objects — task stacks, mutexes, the NMEA message buffers — do
+  take heap, but only at start-up, so `grep` for `alloc` is a necessary check
+  and not a sufficient one.)
 - One `malloc` in the firmware, bounded at one block, released by an invariant.
 - A buffer sized for the worst case and alive for ever is a bug in waiting; a
   response that can be streamed should be.

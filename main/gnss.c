@@ -291,12 +291,15 @@ static void reader_task(void *arg)
                 if (BAUDS[baud_idx] == CONFIG_RGNSS_GNSS_BAUD && baud_idx != 0) {
                     baud_idx = (baud_idx + 1) % (sizeof(BAUDS) / sizeof(BAUDS[0]));  // already tried
                 }
-                data.baud = BAUDS[baud_idx];
-                uart_set_baudrate(GNSS_UART, data.baud);
+                int baud = BAUDS[baud_idx];
+                taskENTER_CRITICAL(&lock);
+                data.baud = baud;
+                taskEXIT_CRITICAL(&lock);
+                uart_set_baudrate(GNSS_UART, baud);
                 uart_flush_input(GNSS_UART);
                 baud_since = esp_timer_get_time();
                 len = 0;
-                ESP_LOGI(TAG, "nothing at the last rate; trying %d baud", data.baud);
+                ESP_LOGI(TAG, "nothing at the last rate; trying %d baud", baud);
             }
         }
 

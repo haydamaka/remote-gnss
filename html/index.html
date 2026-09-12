@@ -354,9 +354,11 @@ function renderMag(m) {
   $('mz').textContent = num(m.z, 2, ' µT');
   $('mb').textContent = ok ? num(Math.hypot(m.x, m.y, m.z), 2, ' µT') : DASH;
   showOffset(m.heading_offset);  // before the heading, which uses the offset
-  $('mh').textContent = ok ? num(((Math.atan2(m.y, m.x) * 180 / Math.PI) + view.offset + 360) % 360, 1, '°') : DASH;
+  view.coef = m.heading_coef || null;
+  $('mh').textContent = ok ? num(corrected((Math.atan2(m.y, m.x) * 180 / Math.PI + 360) % 360), 1, '°') : DASH;
   $('mag-note').textContent = (m.calibrated ? 'Calibrated (offset and shape corrected), sensor axes.' : 'Raw sensor axes, uncalibrated.') +
     ' The heading is atan2(Y, X)' + (view.offset ? ' plus the bearing offset' : '') +
+    (view.coef ? ' and the correction learned from driving' : '') +
     ', valid only with the module held flat.';
 }
 
@@ -478,7 +480,7 @@ document.getElementById('ble-off').addEventListener('click', async () => {
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
-const view = {cal: null, points: [], pointsSeq: -1, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
+const view = {cal: null, points: [], pointsSeq: -1, coef: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
               fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -496,6 +498,19 @@ function colour(name) {
 
 // The firmware sends the calibration; applying it here keeps the plot in step
 // with the table, which shows the device's own corrected readings.
+// The manual bearing offset, plus whatever driving has taught the compass once
+// the user has asked for it to be used. The firmware sends the five deviation
+// coefficients of BEARING-CALIBRATION.md 3.5; without them this is just the offset.
+function corrected(raw) {
+  let d = view.offset;
+  const c = view.coef;
+  if (c) {
+    const h = raw * Math.PI / 180;
+    d += c[0] + c[1] * Math.sin(h) + c[2] * Math.cos(h) + c[3] * Math.sin(2 * h) + c[4] * Math.cos(2 * h);
+  }
+  return (raw + d + 360) % 360;
+}
+
 function calibrated(m) {
   const cal = view.cal && view.cal.cal;
   if (!cal) return m;
@@ -898,7 +913,7 @@ async function pollLive() {
         const b = calibrated(view.live);
         view.headingRaw = (Math.atan2(b[1], b[0]) * 180 / Math.PI + 360) % 360;
         view.headingAt = Date.now();
-        view.headingTarget = (view.headingRaw + view.offset) % 360;
+        view.headingTarget = corrected(view.headingRaw);
         if (view.mode === 'compass') animate(); else if (!view.animating) draw();
       }
       view.since = j.seq;
@@ -1008,7 +1023,7 @@ async function setBearing(bearing) {
     view.offsetHeld = Date.now() + 2000;
     view.headingRaw = raw;
     view.headingAt = Date.now();
-    view.headingTarget = (raw + deg) % 360;
+    view.headingTarget = (raw + deg) % 360;  // the offset just set, before the next poll
     animate();
     $('north-bearing').value = '';  // it described where the module pointed then, not now
     showOffset();

@@ -76,8 +76,9 @@ home network.
 |---|---|
 | `GET /` | the page itself, embedded in the firmware |
 | `GET /api/status` | GNSS fix, magnetometer reading (calibrated when there is a calibration), WiFi, and the device: uptime, last reset reason, build time, running slot, free heap |
-| `GET /api/mag/samples?since=SEQ` | raw magnetometer readings after that sequence number, with the scale factor; the board keeps the last 1024 |
-| `GET /api/cal` | calibration state, progress, coverage, the criterion it is waiting on, how the last session ended, the live fit, the stored calibration, and the buffered readings |
+| `GET /api/mag/samples?since=SEQ` | raw magnetometer readings after that sequence number, with the scale factor; the board keeps the last 256 |
+| `GET /api/cal` | calibration state, progress, coverage, the criterion it is waiting on, how the last session ended, the live fit, the stored calibration, and how many readings are buffered |
+| `GET /api/cal/points` | the buffered readings themselves, streamed; fetch when `points_seq` changes |
 | `POST /api/cal/start[?fresh=1]` | start a session; it continues from the saved readings unless `fresh=1` |
 | `POST /api/cal/stop` | interrupt a session, keeping what is worth keeping |
 | `POST /api/cal/accept` | save the current fit although it is below the quality bar |
@@ -89,6 +90,7 @@ home network.
 | `POST /api/wifi` | `ssid` and `password`, form-encoded: save and restart |
 | `POST /api/wifi/forget` | drop the network set from the page and restart |
 | `POST /api/ota` | a firmware `.bin` as the body: check it, install it, restart into it |
+| `POST /api/ble` | `on` or `off` as the whole body: choose the radio for next boot and restart |
 | `POST /api/restart` | restart the device |
 
 ## Updating the firmware

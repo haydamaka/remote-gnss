@@ -70,6 +70,6 @@ esp_err_t bearing_save(void);
 size_t bearing_trace_count(void);
 bool bearing_trace_at(size_t i, bearing_trace_t *out);
 
-// Corrects a measured heading with what has been learned. Returns false, and
-// leaves heading alone, when nothing is being applied.
-bool bearing_correct(float *heading_deg);
+// The correction itself is applied by whoever computes a heading: the page does
+// it from the coefficients in /api/status, the same way it applies the manual
+// offset. bearing_cal_correct() is the shared implementation.

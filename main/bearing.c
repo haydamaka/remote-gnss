@@ -42,10 +42,13 @@ typedef struct {
 
 static stored_t st = {.version = NVS_VERSION, .learning = true};
 
-// The small result is read under a spinlock; the 4 kB trace is not, because
-// holding interrupts off for that long would upset the WiFi driver.
-static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
-static SemaphoreHandle_t trace_lock;
+// One mutex for everything in here. It was a spinlock for the result and a
+// separate mutex for the trace, which left the rest of `st` - the estimator's
+// own state - with no owner at all: the web server could be blocked inside
+// nvs_set_blob() writing `st` while this task was still feeding readings into
+// st.cal, tearing both the live window and the saved copy. A mutex, not a
+// spinlock, because a save holds it across a flash write.
+static SemaphoreHandle_t st_lock;
 static bearing_result_t latest;
 static TaskHandle_t task;
 
@@ -57,32 +60,34 @@ static bool dirty;
 
 static uint32_t fixes_seen, fixes_usable, blocked[BEARING_BLOCKS];
 
+// Call with st_lock held.
 static void trace_push(const bearing_trace_t *r)
 {
-    xSemaphoreTake(trace_lock, portMAX_DELAY);
     if (st.trace_n < BEARING_TRACE_MAX) {
         st.trace[(st.trace_first + st.trace_n++) % BEARING_TRACE_MAX] = *r;
     } else {
         st.trace[st.trace_first] = *r;  // the ring is full: the oldest minute goes
         st.trace_first = (st.trace_first + 1) % BEARING_TRACE_MAX;
     }
-    xSemaphoreGive(trace_lock);
 }
 
 size_t bearing_trace_count(void)
 {
-    return st.trace_n;
+    xSemaphoreTake(st_lock, portMAX_DELAY);
+    size_t n = st.trace_n;
+    xSemaphoreGive(st_lock);
+    return n;
 }
 
 bool bearing_trace_at(size_t i, bearing_trace_t *out)
 {
     bool ok = false;
-    xSemaphoreTake(trace_lock, portMAX_DELAY);
+    xSemaphoreTake(st_lock, portMAX_DELAY);
     if (i < st.trace_n) {
         *out = st.trace[(st.trace_first + i) % BEARING_TRACE_MAX];
         ok = true;
     }
-    xSemaphoreGive(trace_lock);
+    xSemaphoreGive(st_lock);
     return ok;
 }
 
@@ -103,7 +108,8 @@ const char *bearing_block_name(bearing_block_t b)
 
 // ---- storage ----
 
-static esp_err_t save_locked(void)
+// Call with st_lock held.
+static esp_err_t save_st(void)
 {
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
@@ -112,9 +118,7 @@ static esp_err_t save_locked(void)
     }
     uint16_t keep = st.cal.n;
     st.cal.n = 0;  // an unfinished window is not worth keeping
-    xSemaphoreTake(trace_lock, portMAX_DELAY);
     err = nvs_set_blob(nvs, NVS_KEY_STATE, &st, sizeof(st));
-    xSemaphoreGive(trace_lock);
     st.cal.n = keep;
     if (err == ESP_OK) {
         err = nvs_commit(nvs);
@@ -128,7 +132,10 @@ static esp_err_t save_locked(void)
 
 esp_err_t bearing_save(void)
 {
-    return save_locked();
+    xSemaphoreTake(st_lock, portMAX_DELAY);
+    esp_err_t err = save_st();
+    xSemaphoreGive(st_lock);
+    return err;
 }
 
 static void load(void)
@@ -190,9 +197,13 @@ static bool local_field(const gnss_data_t *g, float *decl, float *horizontal)
     }
     *decl = f.declination;
     *horizontal = f.horizontal;
+    // The once-round amplitude is reported in microtesla, which needs the field
+    // here rather than the default the estimator was built with.
+    st.cal.cfg.h_field_ut = f.horizontal;
     return true;
 }
 
+// Call with st_lock held.
 static void tick(void)
 {
     static int64_t last_epoch;
@@ -272,9 +283,7 @@ static void tick(void)
 
     bearing_result_t r;
     bearing_cal_result(&st.cal, &r);
-    taskENTER_CRITICAL(&lock);
     latest = r;
-    taskEXIT_CRITICAL(&lock);
 }
 
 static void bearing_task(void *arg)
@@ -291,6 +300,7 @@ static void bearing_task(void *arg)
         if (!moving) {
             continue;
         }
+        xSemaphoreTake(st_lock, portMAX_DELAY);
         st.total_s += TICK_MS / 1000.0f;
 
         if (st.learning) {
@@ -306,18 +316,19 @@ static void bearing_task(void *arg)
         }
         if (dirty && st.total_s - last_save_s >= SAVE_EVERY_S) {
             last_save_s = st.total_s;
-            esp_err_t err = save_locked();
+            esp_err_t err = save_st();
             if (err != ESP_OK) {
                 ESP_LOGW(TAG, "could not save: %s", esp_err_to_name(err));
             }
         }
+        xSemaphoreGive(st_lock);
     }
 }
 
 esp_err_t bearing_start(void)
 {
-    trace_lock = xSemaphoreCreateMutex();
-    if (!trace_lock) {
+    st_lock = xSemaphoreCreateMutex();
+    if (!st_lock) {
         return ESP_ERR_NO_MEM;
     }
     load();
@@ -331,66 +342,57 @@ esp_err_t bearing_start(void)
 
 void bearing_get(bearing_status_t *out)
 {
-    taskENTER_CRITICAL(&lock);
+    // One hold, so the reported snapshot cannot mix a before and an after.
+    xSemaphoreTake(st_lock, portMAX_DELAY);
     out->result = latest;
-    taskEXIT_CRITICAL(&lock);
     out->learning = st.learning;
     out->applying = st.applying;
     out->have = out->result.have;
     out->offset_deg = out->result.offset_deg;
     out->total_hours = st.total_s / 3600.0f;
     out->trace_used = st.trace_n;
-    out->stack_free = task ? uxTaskGetStackHighWaterMark(task) : 0;
     out->fixes_seen = fixes_seen;
     out->fixes_usable = fixes_usable;
     memcpy(out->blocked, blocked, sizeof(out->blocked));
+    xSemaphoreGive(st_lock);
+    out->stack_free = task ? uxTaskGetStackHighWaterMark(task) : 0;
 }
 
 esp_err_t bearing_set_learning(bool on)
 {
+    xSemaphoreTake(st_lock, portMAX_DELAY);
     st.learning = on;
-    return save_locked();
+    esp_err_t err = save_st();
+    xSemaphoreGive(st_lock);
+    return err;
 }
 
 esp_err_t bearing_set_applying(bool on)
 {
+    xSemaphoreTake(st_lock, portMAX_DELAY);
     st.applying = on;
-    return save_locked();
+    esp_err_t err = save_st();
+    xSemaphoreGive(st_lock);
+    return err;
 }
 
 esp_err_t bearing_reset(void)
 {
     bearing_cfg_t cfg;
     bearing_cal_defaults(&cfg);
+    xSemaphoreTake(st_lock, portMAX_DELAY);
     bool was_learning = st.learning, was_applying = st.applying;
-    taskENTER_CRITICAL(&lock);
     memset(&latest, 0, sizeof(latest));
-    taskEXIT_CRITICAL(&lock);
-    xSemaphoreTake(trace_lock, portMAX_DELAY);
     memset(&st, 0, sizeof(st));
     st.version = NVS_VERSION;
     st.learning = was_learning;
     st.applying = was_applying;
     bearing_cal_init(&st.cal, &cfg);
-    xSemaphoreGive(trace_lock);
     last_trace_s = last_save_s = 0.0f;
     fixes_seen = fixes_usable = 0;
     memset(blocked, 0, sizeof(blocked));
-    return save_locked();
+    esp_err_t err = save_st();
+    xSemaphoreGive(st_lock);
+    return err;
 }
 
-bool bearing_correct(float *heading_deg)
-{
-    if (!st.applying) {
-        return false;
-    }
-    bearing_result_t r;
-    taskENTER_CRITICAL(&lock);
-    r = latest;
-    taskEXIT_CRITICAL(&lock);
-    if (!r.have) {
-        return false;
-    }
-    *heading_deg = bearing_cal_correct(&r, *heading_deg);
-    return true;
-}
