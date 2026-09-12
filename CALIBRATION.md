@@ -7,6 +7,11 @@ Status:
   reference and checked against it on the host (`tools/fit_test.c`), and
   `main/mag_cal.c` runs it: the session, the direction cells, coverage
   progress, completion or Stop, NVS save/load, and the criteria of §2.
+- **Quality tiers:** every session ends with something saved when the numbers
+  are physical — good, rough or poor (§2.1) — all of them applied, so the
+  compass works whatever the quality, with the page saying which it got.
+- **Limits are settings:** the good and rough fit-error limits and the coverage
+  target live in `menuconfig` under Remote GNSS → Magnetometer calibration.
 - **Still missing, from §3.1:** the intake filters (validity and data-ready,
   the glitch test, the motion gate) and the per-cell agreement test. The fit's
   own MAD-gated reweighting (§3.1e) is in. Until the rest lands, stray readings
@@ -87,6 +92,22 @@ Five independent properties must all hold:
 
 Plus: inliers make up ≥ 90 % of the buffer.
 
+### 2.1 When it isn't perfect
+
+Refusing to save unless everything passes throws away work and leaves the user
+with no compass at all, which is worse than an imperfect one. So a session ends
+in one of four ways, and says which:
+
+| Outcome | When | What happens |
+|---|---|---|
+| **good** | every criterion above | saved; the session completes on its own |
+| **rough** | fit error within the rough limit (6 % by default) and ≥ 70 % inliers, everything else as above | saved and labelled rough; the page warns. **Save anyway** offers this before the timeout |
+| **poor** | the numbers are still physical: radius 20–70 µT, sane shape, at least half the sphere seen | saved and labelled poor, with advice to redo it standing still |
+| **nothing** | not even that | refused, with the reason; the previous calibration stays in use |
+
+All three saved tiers are applied to the compass. Quality is stored with the
+calibration, so a later session and the page both know what they are holding.
+
 Why each is needed:
 
 - **Coverage.** A low fit error on a small arc of the sphere proves nothing:
@@ -141,6 +162,18 @@ component-wise median of that cell's readings, so a wrong reading must be
 repeated in the same direction before it can move the fit. This is what keeps
 single junk readings out of both the fit and the plot.
 
+**(d2) Tidy-up before saving.** When a session ends, the fit is run once more
+on just the readings it kept, so the strays stop pulling on the answer. It is
+taken only if it keeps ≥ 70 % of the readings, improves the error by at least a
+tenth, and moves the centre by less than 1 µT — otherwise it is refused as
+flattery rather than cleaning. Measured on a real session: 355 readings became
+313 and the error fell from 3.67 % to 3.06 %, with the centre unmoved.
+
+Why the guards matter: trimming a set that is really two sets (readings from two
+places) does move the centre, and then the "cleanup" is inventing an answer. On
+one such recording the centre wandered 4.6 µT under trimming, and the tidy-up
+refuses it; on a sound one it moved less than 1 µT (§9).
+
 **(e) Robust fitting, with the threshold taken from the data.** Everything
 above is model-free; this last layer needs only a rough model:
 - **RANSAC start** when the plain start fails: fit a sphere through 4 random
@@ -187,7 +220,26 @@ has changed. Re-calibrate (§4) rather than rejecting them.
 - Before the first fit, `ô` is the midpoint of the 2nd–98th percentile on each
   axis.
 - When `ô` moves by more than 5 % of R, all samples are re-binned.
-- Once coverage passes, eviction also drops the worst-residual sample.
+- **Once a fit can be trusted, the cell's worst reading makes way, not its
+  oldest.** A new reading arriving in a full cell displaces whichever member
+  disagrees most with the current fit. A long session then cleans itself: bad
+  readings are pushed out as better ones arrive, so it converges instead of
+  stalling, and nothing has to be thrown away wholesale.
+
+  This mechanism can confirm its own mistakes, so it is fenced in:
+  - only while the fit is plausible (§3.3) and at least 70 % of readings are
+    inliers; otherwise eviction stays oldest-first;
+  - never below two readings per cell, so no direction can be emptied to please
+    the model;
+  - a newcomer is only dropped in favour of a stored reading when it is clearly
+    worse (say 1.5x), so a real change of environment still gets in;
+  - the report keeps showing the error over *all* buffered readings and the
+    share evicted, so a self-cleaned buffer cannot flatter itself.
+
+  Without those guards the model eats its own tail: discard everything that
+  disagrees and any fit becomes perfect, which is how a calibration can
+  "succeed" and still be wrong. MotionCal does the same thing once coverage is
+  good, and rate-limits it for the same reason (§8).
 
 ### 3.3 Fit pipeline
 

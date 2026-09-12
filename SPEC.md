@@ -55,9 +55,46 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
 - The page source is a separate file in `html/`, embedded in the firmware at
   build time (not inline in C).
 - Two tabs:
-  - **GNSS** (opens by default): coordinates and magnetometer readings as text.
-  - **WiFi**: connection status; set the network to join; forget a network set
-    from the page, which falls back to the built-in one.
+  - **GNSS** (opens by default): coordinates and magnetometer readings as text,
+    and a plot that switches between two views with a radio pair:
+    - **Compass**: a card that turns so north sits at magnetic north, with an
+      index mark for the module's +X axis and the heading read out. The default.
+    - **Sphere**: the calibration readings as a point cloud with the current
+      field as an arrow. A calibration session switches to this view and never
+      switches back on its own.
+  - **WiFi**: connection status; set the network to join (the name is
+    pre-filled); forget a network set from the page, which falls back to the
+    built-in one; the device's uptime and why it last restarted.
+
+## Web API
+
+Everything the page does goes through this, so anything else can drive the
+device too. All replies are JSON. There is no authentication: it is meant for a
+home network.
+
+| Method and path | What it does |
+|---|---|
+| `GET /` | the page itself, embedded in the firmware |
+| `GET /api/status` | GNSS fix, magnetometer reading (calibrated when there is a calibration), WiFi, and the device: uptime, last reset reason, build time, running slot, free heap |
+| `GET /api/mag/samples?since=SEQ` | raw magnetometer readings after that sequence number, with the scale factor; the board keeps the last 1024 |
+| `GET /api/cal` | calibration state, progress, coverage, the criterion it is waiting on, how the last session ended, the live fit, the stored calibration, and the buffered readings |
+| `POST /api/cal/start[?fresh=1]` | start a session; it continues from the saved readings unless `fresh=1` |
+| `POST /api/cal/stop` | interrupt a session, keeping what is worth keeping |
+| `POST /api/cal/accept` | save the current fit although it is below the quality bar |
+| `POST /api/cal/points` | replace the buffered readings with a CSV (`x,y,z` or `seq,t_ms,x,y,z`) |
+| `POST /api/wifi` | `ssid` and `password`, form-encoded: save and restart |
+| `POST /api/wifi/forget` | drop the network set from the page and restart |
+| `POST /api/ota` | a firmware `.bin` as the body: check it, install it, restart into it |
+| `POST /api/restart` | restart the device |
+
+## Updating the firmware
+
+- The partition table (`partitions.csv`) holds two app slots, so firmware can be
+  installed over WiFi with `POST /api/ota` and the device restarts into it. A
+  bad image leaves the running one alone.
+- Only a change to the partition table itself needs USB.
+- NVS keeps its offset in that table, so saved WiFi credentials and calibration
+  survive an update.
 
 ## External GNSS interfaces
 
@@ -70,7 +107,7 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
   Bluetooth Classic (no SPP): Bluetooth there means BLE with the Nordic UART
   Service.
 
-## Magnetometer calibration (interim: offsets only)
+## Magnetometer calibration
 
 - Calibrate the hard- and soft-iron distortion iteratively: keep taking
   readings, recompute the centre and scaling, exclude outliers, and continue
@@ -85,6 +122,17 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
 - A completed calibration is saved to NVS and loaded again at start.
 - The calibration readings are saved too, so a later calibration continues
   from them instead of starting from nothing.
+- **Every session ends with something saved**, as long as the numbers are
+  physical, and the page says plainly what was saved: **good**, **rough** or
+  **poor**. All three are applied — the compass keeps working whatever the
+  quality — and anything but good is shown as a warning. A session that has
+  nothing physical to offer says so and leaves the previous calibration alone.
+- **Save anyway** stores the current fit before it meets the bar.
+- **Save and load calibration** write and read the *readings* (not the fitted
+  parameters) as CSV, named `mag-YYYYMMDD-HHMMSS.csv`, in the same columns as
+  the recordings under `tools/`.
+- The quality limits and the coverage target are `menuconfig` settings under
+  **Remote GNSS → Magnetometer calibration**.
 - Outside calibration, the same plot shows the current magnetometer vector as
   an arrow (not a point), in the same colour scheme as the points.
 - World Magnetic Model: a later phase.
@@ -101,7 +149,9 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
 | `webserver.c`    | HTTP server, embedded page, JSON API                    |
 | `gnss.c`         | Reads the receiver on UART1; NMEA parsing with minmea   |
 | `magnetometer.c` | Reads the QMC5883P/L or IST8310 on I2C                  |
-| `mag_cal.c`      | Calibration sessions, direction cells, fit, NVS storage |
+| `mag_cal.c`      | Calibration sessions, direction cells, criteria, NVS storage |
+| `mag_fit.c`      | The fit itself: robust 9-parameter ellipsoid, no RTOS or storage |
+| `ota.c`          | Firmware updates over WiFi                              |
 
 minmea (https://github.com/kosma/minmea) is vendored in `components/minmea`.
 
