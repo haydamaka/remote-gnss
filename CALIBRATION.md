@@ -3,12 +3,16 @@
 Status:
 
 - **Offline reference:** `tools/mag_calibrate.py`, tested (§9).
-- **Firmware:** `main/mag_cal.c` runs an interim version. It has the session,
-  the direction cells, coverage progress, completion or Stop, and NVS
-  save/load, but fits only a robust sphere (offsets). Of the outlier handling
-  in §3.1 it has none: it accepts every reading that isn't saturated, which is
-  why stray readings show up on the plot. §3.1 is the plan for fixing that.
-- **Next:** port the reference's 9-parameter pipeline into `mag_cal.c`.
+- **Firmware:** `main/mag_fit.c` is the 9-parameter fit, ported from that
+  reference and checked against it on the host (`tools/fit_test.c`), and
+  `main/mag_cal.c` runs it: the session, the direction cells, coverage
+  progress, completion or Stop, NVS save/load, and the criteria of §2.
+- **Still missing, from §3.1:** the intake filters (validity and data-ready,
+  the glitch test, the motion gate) and the per-cell agreement test. The fit's
+  own MAD-gated reweighting (§3.1e) is in. Until the rest lands, stray readings
+  still enter the buffer and show on the plot; the fit judges them, the buffer
+  doesn't.
+- **Also missing:** the noise estimate, so the fit-error limit is loosened (§9).
 
 The steps are:
 
@@ -373,9 +377,15 @@ places, all in the `#define` block at the top of that file:
 | Setting | Plan (§2, §3) | Firmware today |
 |---|---|---|
 | Coverage | ≥ 85 of 100 cells holding ≥ 2 readings that agree | 90 % of cells with ≥ 2 readings; agreement not checked |
-| Fit error | ≤ 1.5 % | ≤ 10 %: a sphere alone can't absorb soft iron |
+| Fit error | ≤ 1.5 %, or 3 × noise / R | ≤ 2.5 % flat: there is no noise estimate yet |
 | Saturation | the IST8310's per-axis limits (±1600 / ±2500 µT) | a flat 1000 µT for every chip |
 | Completion | the criteria of §2 | those, plus ≥ 100 new readings in the session, so a continued session always brings in fresh data |
+
+Measured on the device (ESP32-C3 at 160 MHz, no FPU, 268 readings): a fit from
+cold takes 2.1 s and one continued from the previous fit 0.36 s, so `mag_cal.c`
+refits at most every 3 s, always passing the previous fit, and always with the
+lock released — otherwise every HTTP request would wait behind it. The fit uses
+2.7 KB of stack, which is why the calibration task has 6 KB.
 
 **Changes adopted from testing:**
 

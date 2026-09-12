@@ -2,7 +2,6 @@
 
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -13,26 +12,41 @@
 #include "freertos/task.h"
 #include "nvs.h"
 
+#include "mag_fit.h"
 #include "magnetometer.h"
+
+_Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer readings than the buffer holds");
 
 #define NVS_NAMESPACE "magcal"
 #define NVS_VERSION 1
 #define TASK_PERIOD_MS 100
-#define REFIT_EVERY 10            // new readings between refits
+#define REFIT_AFTER 20                // new readings before fitting again
+#define FIT_EVERY_US (3 * 1000000LL)  // and no sooner: a fit costs a good fraction of a second
 #define MIN_FIT_POINTS 20
-#define RECENTRE_UT 2.0f          // centre shift that triggers re-binning
-#define COVERAGE_DONE 0.9f        // share of cells counted as covered
-#define CELL_MIN 2                // readings for a cell to count as covered
-#define CAP_MIN 5                 // readings within 45° of each of ±X, ±Y, ±Z
+#define RECENTRE_UT 2.0f              // centre shift that triggers re-binning
+#define COVERAGE_DONE 0.9f            // share of cells counted as covered
+#define CELL_MIN 2                    // readings for a cell to count as covered
+#define CAP_MIN 5                     // readings within 45° of each of ±X, ±Y, ±Z
 #define CAP_COS 0.70710678f
 #define SESSION_TIMEOUT_US (5 * 60 * 1000000LL)
-#define SESSION_MIN_NEW 100       // new readings before a continued session may complete
+#define SESSION_MIN_NEW 100           // fresh readings before a continued session may finish
 #define SAVE_EVERY_US (30 * 1000000LL)
-#define RADIUS_MIN 20.0f          // plausible Earth field, µT
-#define RADIUS_MAX 70.0f
-#define FIT_RMS_MAX 0.10f         // loose: a sphere can't absorb soft iron
-#define OUTLIER_FLOOR 0.02f       // never gate tighter than 2 % of the radius
 #define SATURATION_UT 1000.0f
+
+// CALIBRATION.md §2, with the interim fit-error limit of §9: without a noise
+// estimate yet, 1.5 % is out of reach on real data.
+#define RADIUS_MIN 20.0f
+#define RADIUS_MAX 70.0f
+#define ACCEPT_RMS 0.025f
+#define ACCEPT_WOBBLE 0.02f
+#define ACCEPT_SCATTER 0.2f
+#define ACCEPT_INLIERS 0.9f
+#define EIG_MIN 0.67f
+#define EIG_MAX 1.5f
+#define STABLE_FITS 3
+#define STABLE_OFFSET_UT 0.5f
+#define STABLE_MATRIX 0.01f
+#define STABLE_RADIUS 0.005f
 
 static const char *TAG = "mag_cal";
 
@@ -54,7 +68,8 @@ typedef struct {
 // Everything below is guarded by lock.
 static SemaphoreHandle_t lock;
 static mag_cal_state_t state = MAG_CAL_IDLE;
-static char reason_buf[64];  // empty unless the last session failed
+static char reason_buf[64];    // empty unless the last session failed
+static char blocking_buf[64];  // which criterion is holding a running session up
 static point_t points[MAG_CAL_MAX_POINTS];
 static uint16_t npoints;
 static uint32_t arrivals;
@@ -64,37 +79,24 @@ static float progress;
 static uint8_t missing = 0x3F;
 static int64_t session_start;
 static int64_t last_save;
+static int64_t last_fit;
+static uint32_t session_id;
 static int session_new;
 static mag_cal_params_t params;
 static mag_cal_params_t params_before_save;
+static mag_fit_t fit;
+static bool have_fit;
+static int stable_count;
+static uint32_t fit_ms;
 static bool points_dirty;
 static bool params_dirty;
 static bool started;
+static TaskHandle_t task;
 
 static float dist(const float a[3], const float b[3])
 {
     float d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
     return sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-}
-
-static uint8_t band(float lon, int n, int first)
-{
-    int i = (int)(lon / (2.0f * (float)M_PI) * n);
-    return first + (i < n - 1 ? i : n - 1);
-}
-
-// 100 equal-area cells: bands of 1, 15, 34, 34, 15 and 1 cells split at z = 0.98,
-// 0.68, 0, -0.68, -0.98 (a sphere's area is proportional to z). CALIBRATION.md
-// §3.2 defines this; tools/mag_calibrate.py has the other copy.
-static uint8_t cell_of(const float u[3])
-{
-    float lon = atan2f(u[1], u[0]) + (float)M_PI;
-    if (u[2] > 0.98f) return 0;
-    if (u[2] > 0.68f) return band(lon, 15, 1);
-    if (u[2] > 0.0f) return band(lon, 34, 16);
-    if (u[2] > -0.68f) return band(lon, 34, 50);
-    if (u[2] > -0.98f) return band(lon, 15, 84);
-    return 99;
 }
 
 // Direction of v about c; false if v sits on it.
@@ -133,7 +135,7 @@ static void add_reading(const float m[3])
     if (!direction(m, u)) {
         return;
     }
-    point_t p = {.v = {m[0], m[1], m[2]}, .order = arrivals++, .cell = cell_of(u)};
+    point_t p = {.v = {m[0], m[1], m[2]}, .order = arrivals++, .cell = mag_fit_cell(u)};
     int count = 0;
     for (int i = 0; i < npoints; i++) {
         count += points[i].cell == p.cell;
@@ -153,7 +155,7 @@ static void rebin(void)
     uint16_t count[MAG_CAL_CELLS] = {0};  // a single cell can hold every reading
     for (int i = 0; i < npoints; i++) {
         float u[3];
-        points[i].cell = direction(points[i].v, u) ? cell_of(u) : 0;
+        points[i].cell = direction(points[i].v, u) ? mag_fit_cell(u) : 0;
         count[points[i].cell]++;
     }
     for (int c = 0; c < MAG_CAL_CELLS; c++) {
@@ -164,135 +166,13 @@ static void rebin(void)
     }
 }
 
-// Least-squares sphere (Kåsa: solves |p|² = 2·p·c + d) through the readings with
-// use[i] set, or all if use is NULL. False if degenerate.
-static bool sphere_fit(const bool *use, float c[3], float *r)
-{
-    double m[4][5] = {0};  // normal equations, augmented
-    int n = 0;
-    for (int i = 0; i < npoints; i++) {
-        if (use && !use[i]) {
-            continue;
-        }
-        const float *p = points[i].v;
-        double row[4] = {2.0 * p[0], 2.0 * p[1], 2.0 * p[2], 1.0};
-        double b = (double)p[0] * p[0] + (double)p[1] * p[1] + (double)p[2] * p[2];
-        for (int a = 0; a < 4; a++) {
-            for (int k = 0; k < 4; k++) {
-                m[a][k] += row[a] * row[k];
-            }
-            m[a][4] += row[a] * b;
-        }
-        n++;
-    }
-    if (n < 10) {
-        return false;
-    }
-    for (int col = 0; col < 4; col++) {  // Gaussian elimination, partial pivoting
-        int piv = col;
-        for (int r2 = col + 1; r2 < 4; r2++) {
-            if (fabs(m[r2][col]) > fabs(m[piv][col])) {
-                piv = r2;
-            }
-        }
-        if (fabs(m[piv][col]) < 1e-9) {
-            return false;
-        }
-        for (int k = 0; k < 5; k++) {
-            double t = m[col][k];
-            m[col][k] = m[piv][k];
-            m[piv][k] = t;
-        }
-        for (int r2 = col + 1; r2 < 4; r2++) {
-            double f = m[r2][col] / m[col][col];
-            for (int k = col; k < 5; k++) {
-                m[r2][k] -= f * m[col][k];
-            }
-        }
-    }
-    double s[4];
-    for (int i = 3; i >= 0; i--) {
-        double acc = m[i][4];
-        for (int k = i + 1; k < 4; k++) {
-            acc -= m[i][k] * s[k];
-        }
-        s[i] = acc / m[i][i];
-    }
-    double r2 = s[3] + s[0] * s[0] + s[1] * s[1] + s[2] * s[2];
-    if (!(r2 > 1.0 && r2 < 1e6)) {
-        return false;
-    }
-    for (int i = 0; i < 3; i++) {
-        c[i] = (float)s[i];
-    }
-    *r = (float)sqrt(r2);
-    return true;
-}
-
-static int cmp_float(const void *a, const void *b)
-{
-    float x = *(const float *)a;
-    float y = *(const float *)b;
-    return (x > y) - (x < y);
-}
-
-// Sphere fit, then again without the readings more than 3 robust standard
-// deviations (MAD-based) from it. Returns the inliers' RMS of |p − c|/r − 1,
-// or a negative number if the fit failed.
-static float robust_sphere_fit(float c[3], float *r)
-{
-    // Only the calibration task fits, so these can be static.
-    static float res[MAG_CAL_MAX_POINTS];
-    static float tmp[MAG_CAL_MAX_POINTS];
-    static bool use[MAG_CAL_MAX_POINTS];
-
-    if (!sphere_fit(NULL, c, r)) {
-        return -1.0f;
-    }
-    for (int i = 0; i < npoints; i++) {
-        res[i] = tmp[i] = dist(points[i].v, c) / *r - 1.0f;
-    }
-    qsort(tmp, npoints, sizeof(float), cmp_float);
-    float median = tmp[npoints / 2];
-    for (int i = 0; i < npoints; i++) {
-        tmp[i] = fabsf(res[i] - median);
-    }
-    qsort(tmp, npoints, sizeof(float), cmp_float);
-    float gate = fmaxf(3.0f * 1.4826f * tmp[npoints / 2], OUTLIER_FLOOR);
-    for (int i = 0; i < npoints; i++) {
-        use[i] = fabsf(res[i] - median) <= gate;
-    }
-    if (!sphere_fit(use, c, r)) {
-        return -1.0f;
-    }
-    double sum = 0;
-    int n = 0;
-    for (int i = 0; i < npoints; i++) {
-        if (use[i]) {
-            float e = dist(points[i].v, c) / *r - 1.0f;
-            sum += e * e;
-            n++;
-        }
-    }
-    return (float)sqrt(sum / n);
-}
-
-// A fit through an arc of readings can come out as a huge sphere. Binning around
-// its centre would pile every reading into one or two cells, and the per-cell cap
-// would then throw most of them away.
-static bool plausible(const float c[3], float r)
-{
-    const float zero[3] = {0};
-    return r > 10.0f && r < 140.0f && dist(c, zero) < 500.0f;
-}
-
 // Whether re-binning around c would keep at least half the readings.
 static bool rebin_keeps_most(const float c[3])
 {
-    uint16_t count[MAG_CAL_CELLS] = {0};  // a single cell can hold every reading
+    uint16_t count[MAG_CAL_CELLS] = {0};
     for (int i = 0; i < npoints; i++) {
         float u[3];
-        count[direction_from(c, points[i].v, u) ? cell_of(u) : 0]++;
+        count[direction_from(c, points[i].v, u) ? mag_fit_cell(u) : 0]++;
     }
     int evicted = 0;
     for (int k = 0; k < MAG_CAL_CELLS; k++) {
@@ -301,14 +181,9 @@ static bool rebin_keeps_most(const float c[3])
     return evicted <= npoints / 2;
 }
 
-// The latest plausible fit's centre, or the middle of the readings' range until
-// there is one.
-static void estimate_centre(float c[3])
+// The middle of the readings' range, until a fit gives something better.
+static void range_centre(float c[3])
 {
-    float r;
-    if (npoints >= MIN_FIT_POINTS && robust_sphere_fit(c, &r) >= 0 && plausible(c, r)) {
-        return;
-    }
     float lo[3] = {INFINITY, INFINITY, INFINITY};
     float hi[3] = {-INFINITY, -INFINITY, -INFINITY};
     for (int i = 0; i < npoints; i++) {
@@ -322,11 +197,8 @@ static void estimate_centre(float c[3])
     }
 }
 
-// Moves the centre to estimate_centre() and re-bins when it moved noticeably.
-static void recentre(void)
+static void recentre_to(const float c[3])
 {
-    float c[3];
-    estimate_centre(c);
     if (dist(c, centre) > RECENTRE_UT && rebin_keeps_most(c)) {
         memcpy(centre, c, sizeof(centre));
         rebin();
@@ -335,7 +207,7 @@ static void recentre(void)
 
 static void update_progress(void)
 {
-    uint16_t count[MAG_CAL_CELLS] = {0};  // a single cell can hold every reading
+    uint16_t count[MAG_CAL_CELLS] = {0};
     int caps[6] = {0};
     for (int i = 0; i < npoints; i++) {
         float u[3];
@@ -360,9 +232,70 @@ static void update_progress(void)
         }
     }
     coverage = covered / (float)MAG_CAL_CELLS;
-    // Reaches 1 when coverage and the caps are done. Completing also needs
-    // SESSION_MIN_NEW fresh readings, which this doesn't show.
+    // Reaches 1 when coverage and the caps are done. Completing also needs the
+    // fit to meet CALIBRATION.md §2 and SESSION_MIN_NEW fresh readings.
     progress = 0.85f * fminf(1.0f, coverage / COVERAGE_DONE) + 0.15f * caps_ok / 6.0f;
+}
+
+// Which criterion of §2 is not met yet, or NULL when the fit may be accepted.
+// The text lands in the failure message, so it says the value and the limit.
+static const char *unmet(char *buf, size_t size)
+{
+    if (!have_fit) {
+        return "no fit yet";
+    }
+    if (coverage < COVERAGE_DONE || missing) {
+        snprintf(buf, size, "coverage %.0f %% (target %.0f %%)", coverage * 100, COVERAGE_DONE * 100);
+        return buf;
+    }
+    if (fit.radius < RADIUS_MIN || fit.radius > RADIUS_MAX) {
+        snprintf(buf, size, "field strength %.0f µT (want %.0f-%.0f)", fit.radius, (double)RADIUS_MIN,
+                 (double)RADIUS_MAX);
+        return buf;
+    }
+    if (fit.eig_min < EIG_MIN || fit.eig_max > EIG_MAX) {
+        snprintf(buf, size, "shape %.2f-%.2f (want %.2f-%.2f)", fit.eig_min, fit.eig_max, (double)EIG_MIN,
+                 (double)EIG_MAX);
+        return buf;
+    }
+    if (fit.rms > ACCEPT_RMS) {
+        snprintf(buf, size, "fit error %.1f %% (limit %.1f %%)", fit.rms * 100, (double)ACCEPT_RMS * 100);
+        return buf;
+    }
+    if (fit.wobble > ACCEPT_WOBBLE) {
+        snprintf(buf, size, "wobble %.1f %% (limit %.1f %%)", fit.wobble * 100, (double)ACCEPT_WOBBLE * 100);
+        return buf;
+    }
+    if (fit.scatter < ACCEPT_SCATTER) {
+        snprintf(buf, size, "readings too flat (spread %.2f, want %.2f)", fit.scatter, (double)ACCEPT_SCATTER);
+        return buf;
+    }
+    if (fit.inliers < fit.points * ACCEPT_INLIERS) {
+        snprintf(buf, size, "only %u of %u readings fit", fit.inliers, fit.points);
+        return buf;
+    }
+    if (stable_count < STABLE_FITS - 1) {
+        return "still settling";
+    }
+    return NULL;
+}
+
+static bool settled(const mag_fit_t *a, const mag_fit_t *b)
+{
+    if (fabsf(a->radius - b->radius) > STABLE_RADIUS * b->radius) {
+        return false;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (fabsf(a->offset[i] - b->offset[i]) > STABLE_OFFSET_UT) {
+            return false;
+        }
+    }
+    for (int i = 0; i < 9; i++) {
+        if (fabsf(a->matrix[i] - b->matrix[i]) > STABLE_MATRIX) {
+            return false;
+        }
+    }
+    return true;
 }
 
 // Packs the readings oldest first, so a restored buffer keeps its replacement
@@ -490,7 +423,7 @@ static void load(void)
 
     if (npoints) {
         if (!params.valid) {
-            estimate_centre(centre);
+            range_centre(centre);
         }
         rebin();
         update_progress();
@@ -498,41 +431,81 @@ static void load(void)
     }
 }
 
+// With the lock held.
 static void finish(void)
 {
-    float c[3];
-    float r;
-    char text[sizeof(reason_buf)];
-    float rms = robust_sphere_fit(c, &r);
-    if (rms < 0) {
-        fail("The readings don't form a sphere");
-        return;
-    }
-    if (r < RADIUS_MIN || r > RADIUS_MAX) {
-        snprintf(text, sizeof(text), "Field strength %.0f µT is outside %.0f-%.0f µT", r, (double)RADIUS_MIN,
-                 (double)RADIUS_MAX);
-        fail(text);
-        return;
-    }
-    if (rms > FIT_RMS_MAX) {
-        snprintf(text, sizeof(text), "Readings too scattered (%.0f %% from the sphere)", rms * 100);
-        fail(text);
-        return;
-    }
     params_before_save = params;
-    params = (mag_cal_params_t){
-        .valid = true,
-        .offset = {c[0], c[1], c[2]},
-        .matrix = {1, 0, 0, 0, 1, 0, 0, 0, 1},
-        .radius = r,
-        .fit_rms = rms,
-        .points = npoints,
-    };
-    memcpy(centre, c, sizeof(centre));
+    params.valid = true;
+    memcpy(params.offset, fit.offset, sizeof(params.offset));
+    memcpy(params.matrix, fit.matrix, sizeof(params.matrix));
+    params.radius = fit.radius;
+    params.fit_rms = fit.rms;
+    params.points = npoints;
     state = MAG_CAL_DONE;
     params_dirty = points_dirty = true;  // written by flush_nvs(), outside the lock
-    ESP_LOGI(TAG, "saved: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.1f %%, %u points", c[0], c[1], c[2], r,
-             rms * 100, npoints);
+    ESP_LOGI(TAG, "saved: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.2f %%, level %u, %u readings",
+             fit.offset[0], fit.offset[1], fit.offset[2], fit.radius, fit.rms * 100, fit.level, npoints);
+}
+
+// A fit costs a good fraction of a second on this chip, so it runs on a copy
+// with the lock released, and its result is only used if the session it belongs
+// to is still the current one.
+static void run_fit(void)
+{
+    static float snapshot[MAG_CAL_MAX_POINTS][3];
+    mag_fit_t start;
+    mag_fit_t result;
+    bool have_start;
+    uint32_t id;
+    size_t n;
+
+    xSemaphoreTake(lock, portMAX_DELAY);
+    n = npoints;
+    for (size_t i = 0; i < n; i++) {
+        memcpy(snapshot[i], points[i].v, sizeof(snapshot[i]));
+    }
+    start = fit;
+    have_start = have_fit;
+    id = session_id;
+    last_fit = esp_timer_get_time();
+    xSemaphoreGive(lock);
+
+    int64_t began = esp_timer_get_time();
+    bool ok = mag_fit(snapshot, n, 0.0f, have_start ? &start : NULL, &result, NULL);
+    uint32_t took = (uint32_t)((esp_timer_get_time() - began) / 1000);
+
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (id != session_id) {
+        xSemaphoreGive(lock);  // the session was restarted while we fitted
+        return;
+    }
+    fit_ms = took;
+    if (ok) {
+        stable_count = have_fit && settled(&result, &fit) ? stable_count + 1 : 0;
+        fit = result;
+        have_fit = true;
+        if (mag_fit_plausible_for_binning(&result)) {
+            recentre_to(result.offset);
+        }
+        update_progress();
+    }
+    if (state == MAG_CAL_RUNNING) {
+        char detail[sizeof(reason_buf)];
+        const char *missing_criterion = unmet(detail, sizeof(detail));
+        if (!missing_criterion && session_new < SESSION_MIN_NEW) {
+            missing_criterion = "more fresh readings";  // a continued session must bring new data
+        }
+        strlcpy(blocking_buf, missing_criterion ? missing_criterion : "", sizeof(blocking_buf));
+        if (!missing_criterion && session_new >= SESSION_MIN_NEW) {
+            finish();
+        } else if (esp_timer_get_time() - session_start > SESSION_TIMEOUT_US) {
+            char text[sizeof(reason_buf)];
+            snprintf(text, sizeof(text), "Gave up after 5 minutes: %s",
+                     missing_criterion ? missing_criterion : "too few new readings");
+            fail(text);
+        }
+    }
+    xSemaphoreGive(lock);
 }
 
 static void cal_task(void *arg)
@@ -563,20 +536,20 @@ static void cal_task(void *arg)
             fresh++;
             session_new++;
         }
-        if (state == MAG_CAL_RUNNING && fresh >= REFIT_EVERY) {
+        bool due = state == MAG_CAL_RUNNING && fresh >= REFIT_AFTER && npoints >= MIN_FIT_POINTS &&
+                   esp_timer_get_time() - last_fit > FIT_EVERY_US;
+        bool save_due = state == MAG_CAL_RUNNING && esp_timer_get_time() - last_save > SAVE_EVERY_US;
+        if (due) {
             fresh = 0;
-            recentre();
-            update_progress();
-            int64_t now = esp_timer_get_time();
-            if (coverage >= COVERAGE_DONE && missing == 0 && session_new >= SESSION_MIN_NEW) {
-                finish();
-            } else if (now - session_start > SESSION_TIMEOUT_US) {
-                fail("Timed out after 5 minutes");
-            } else if (now - last_save > SAVE_EVERY_US) {
-                points_dirty = true;
-            }
+        }
+        if (save_due) {
+            points_dirty = true;
         }
         xSemaphoreGive(lock);
+
+        if (due) {
+            run_fit();
+        }
         flush_nvs();
     }
 }
@@ -586,7 +559,7 @@ esp_err_t mag_cal_init(void)
     lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(lock, ESP_ERR_NO_MEM, TAG, "create lock");
     load();
-    ESP_RETURN_ON_FALSE(xTaskCreate(cal_task, "mag_cal", 4096, NULL, 3, NULL) == pdPASS, ESP_ERR_NO_MEM,
+    ESP_RETURN_ON_FALSE(xTaskCreate(cal_task, "mag_cal", 6144, NULL, 3, &task) == pdPASS, ESP_ERR_NO_MEM,
                         TAG, "create task");
     started = true;
     return ESP_OK;
@@ -609,8 +582,14 @@ esp_err_t mag_cal_begin(bool fresh)
     }
     update_progress();
     reason_buf[0] = '\0';
+    blocking_buf[0] = '\0';
+    have_fit = false;  // start the stability count over, and refit from scratch
+    stable_count = 0;
+    fit_ms = 0;
     session_new = 0;
+    session_id++;
     session_start = last_save = esp_timer_get_time();
+    last_fit = 0;
     state = MAG_CAL_RUNNING;
     xSemaphoreGive(lock);
     ESP_LOGI(TAG, "calibration %s at %.0f %%", fresh ? "started over" : "continued", progress * 100);
@@ -639,8 +618,12 @@ void mag_cal_get_status(mag_cal_status_t *out)
         .centre = {centre[0], centre[1], centre[2]},
         .points = npoints,
         .params = params,
+        .have_fit = have_fit,
+        .fit = fit,
+        .fit_ms = fit_ms,
     };
     strlcpy(out->reason, reason_buf, sizeof(out->reason));
+    strlcpy(out->blocking, blocking_buf, sizeof(out->blocking));
     xSemaphoreGive(lock);
 }
 
@@ -653,6 +636,11 @@ size_t mag_cal_get_points(float (*out)[3], size_t max)
     }
     xSemaphoreGive(lock);
     return n;
+}
+
+size_t mag_cal_stack_free(void)
+{
+    return task ? uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t) : 0;
 }
 
 bool mag_cal_apply(const float m[3], float b[3])

@@ -319,6 +319,7 @@ const view = {cal: null, live: null, since: 0, skip: true, calTimer: 0, calError
               fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+const LEVELS = ['sphere', 'per-axis', '9-parameter'];  // how many parameters the fit dares to use
 
 // Colours from the stylesheet, read once: the canvas can't use CSS variables.
 function colour(name) {
@@ -569,11 +570,16 @@ function renderCal() {
   const summary = c.cal ? `radius ${c.cal.radius.toFixed(1)} µT, fit ${(c.cal.rms * 100).toFixed(1)} %` : '';
   let text, cls, hint;
   if (running) {
-    text = `Calibrating · ${pct} %`;
+    // The bar is coverage; finishing also needs the fit itself to pass, so say what's left.
+    text = c.blocking ? `Calibrating · waiting on ${c.blocking}` : `Calibrating · ${pct} %`;
     cls = '';
     hint = `${c.points.length} readings kept, ${Math.round(c.coverage * 100)} % of directions covered (target 90 %). ` +
       'Rotate the module slowly through every orientation' +
       (missing.length ? `; not reached yet: ${missing.join(', ')}.` : '.');
+    if (c.fit) {
+      hint += ` Fit so far: ${(c.fit.rms * 100).toFixed(1)} % off the sphere with the ${LEVELS[c.fit.level]} model, ` +
+        `${c.fit.inliers} of ${c.fit.points} readings used.`;
+    }
   } else if (c.state === 'failed') {
     [text, cls, hint] = [`Calibration failed: ${c.reason || 'unknown reason'}`, 'bad', kept];
   } else if (c.state === 'stopped') {

@@ -6,12 +6,14 @@
 
 #include "esp_err.h"
 
+#include "mag_fit.h"
+
 // Magnetometer calibration: a session collects readings into 100 equal-area
 // direction cells (up to 4 each) until they cover the sphere, fits it, saves the
 // result to NVS and applies it from then on. The readings themselves are saved
 // too (on completion, Stop, failure and every 30 s), so the next session
-// continues from them instead of starting empty. See CALIBRATION.md. The fit is
-// a plain sphere (hard iron) until the robust 9-parameter pipeline is ported.
+// continues from them instead of starting empty. The fitting itself is main/mag_fit.c.
+// See CALIBRATION.md.
 
 #define MAG_CAL_CELLS 100
 #define MAG_CAL_PER_CELL 4
@@ -38,12 +40,16 @@ typedef struct {
 typedef struct {
     mag_cal_state_t state;
     char reason[64];            // why it failed, else empty
+    char blocking[64];          // what a running session is still waiting for, else empty
     float progress;             // 0..1, 1 exactly when complete
     float coverage;             // share of cells holding ≥ 2 readings
     uint8_t missing;            // bit k: cap k of +X −X +Y −Y +Z −Z not reached
     float centre[3];            // current centre estimate
     uint16_t points;            // readings in the buffer
     mag_cal_params_t params;    // the calibration in use
+    bool have_fit;              // whether fit holds a result yet
+    mag_fit_t fit;              // the latest fit, for showing how it's going
+    uint32_t fit_ms;            // what that fit cost
 } mag_cal_status_t;
 
 // Loads the saved calibration and starts the calibration task. Call after
@@ -61,6 +67,10 @@ void mag_cal_get_status(mag_cal_status_t *out);
 
 // Copies up to max buffered readings (µT): the session's, or the saved ones.
 size_t mag_cal_get_points(float (*out)[3], size_t max);
+
+// Bytes of stack the calibration task has never used: the fit is the heaviest
+// thing it does, so this is what to watch when the fit grows.
+size_t mag_cal_stack_free(void);
 
 // Applies the calibration in use; copies m when there is none. False if none.
 bool mag_cal_apply(const float m[3], float b[3]);

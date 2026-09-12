@@ -283,6 +283,8 @@ static esp_err_t status_get(httpd_req_t *req)
     json_str(&j, "reset", reset_reason());
     json_str(&j, "built", built);
     json_str(&j, "partition", esp_ota_get_running_partition()->label);
+    json_int(&j, "heap_min", esp_get_minimum_free_heap_size());
+    json_int(&j, "cal_stack_free", mag_cal_stack_free());
     json_close(&j);
 
     json_close(&j);
@@ -357,6 +359,7 @@ static esp_err_t cal_get(httpd_req_t *req)
     json_open(&j, NULL);
     json_str(&j, "state", STATES[s.state]);
     json_str(&j, "reason", s.reason[0] ? s.reason : NULL);
+    json_str(&j, "blocking", s.blocking[0] ? s.blocking : NULL);
     json_num(&j, "progress", s.progress, 3);
     json_num(&j, "coverage", s.coverage, 3);
     json_key(&j, "missing");
@@ -379,6 +382,19 @@ static esp_err_t cal_get(httpd_req_t *req)
         json_close(&j);
     } else {
         json_str(&j, "cal", NULL);
+    }
+    if (s.have_fit) {
+        json_open(&j, "fit");
+        json_num(&j, "radius", s.fit.radius, 2);
+        json_num(&j, "rms", s.fit.rms, 4);
+        json_int(&j, "level", s.fit.level);
+        json_int(&j, "inliers", s.fit.inliers);
+        json_int(&j, "points", s.fit.points);
+        json_int(&j, "cells", s.fit.cells);
+        json_int(&j, "ms", s.fit_ms);
+        json_close(&j);
+    } else {
+        json_str(&j, "fit", NULL);
     }
     json_key(&j, "points");
     json_append(&j, "[");
