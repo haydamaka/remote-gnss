@@ -424,6 +424,67 @@ static esp_err_t cal_start_post(httpd_req_t *req)
 // Saves a fit that is usable but below the quality bar, labelled as rough.
 static esp_err_t cal_accept_post(httpd_req_t *req)
 {
+// Readings from a CSV the user saved earlier: any line whose first three
+// numbers parse is taken, so both our column layouts work and a header is
+// simply skipped.
+static esp_err_t cal_points_post(httpd_req_t *req)
+{
+    static float pts[MAG_CAL_MAX_POINTS][3];
+    char chunk[512];
+    char line[80];
+    size_t line_len = 0, n = 0, got = 0;
+    int timeouts = 0;
+
+    while (got < req->content_len) {
+        size_t want = req->content_len - got < sizeof(chunk) ? req->content_len - got : sizeof(chunk);
+        int r = httpd_req_recv(req, chunk, want);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 3) {
+                return reply(req, HTTPD_400, "The upload stalled");
+            }
+            continue;
+        }
+        if (r <= 0) {
+            return ESP_FAIL;
+        }
+        got += r;
+        for (int i = 0; i < r; i++) {
+            char ch = chunk[i];
+            if (ch != '\n' && ch != '\r') {
+                if (line_len < sizeof(line) - 1) {
+                    line[line_len++] = ch;
+                }
+                continue;
+            }
+            line[line_len] = '\0';
+            float v[6];
+            int k = 0;
+            for (char *p = line; k < 6; k++) {
+                char *end;
+                v[k] = strtof(p, &end);
+                if (end == p) {
+                    break;
+                }
+                for (p = end; *p == ',' || *p == ';' || *p == ' ' || *p == '\t'; p++) {
+                }
+            }
+            // The last three numbers on the line are x, y, z: that takes both a bare
+            // x,y,z file and our recordings, which are seq,t_ms,x,y,z.
+            if (n < MAG_CAL_MAX_POINTS && k >= 3) {
+                memcpy(pts[n++], v + k - 3, 3 * sizeof(float));
+            }
+            line_len = 0;
+        }
+    }
+    if (n < 20) {
+        return reply(req, HTTPD_400, "Too few readings in that file");
+    }
+    if (mag_cal_set_points(pts, n) != ESP_OK) {
+        return reply(req, HTTPD_500, "Could not load the readings");
+    }
+    return reply(req, HTTPD_200, NULL);
+}
+
     if (mag_cal_accept() != ESP_OK) {
         return reply(req, HTTPD_400, "The fit isn't good enough to save yet");
     }
@@ -556,6 +617,7 @@ esp_err_t webserver_start(void)
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
         {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
+        {.uri = "/api/cal/points", .method = HTTP_POST, .handler = cal_points_post},
         {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = forget_post},
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {

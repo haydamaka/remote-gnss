@@ -75,6 +75,11 @@ void mag_cal_get_status(mag_cal_status_t *out);
 size_t mag_cal_get_points(float (*out)[3], size_t max);
 
 // Bytes of stack the calibration task has never used: the fit is the heaviest
+// Replaces the buffered readings with a set loaded from elsewhere (a file the
+// user saved earlier). The session state is cleared; the readings are kept and
+// re-binned, so a following session continues from them.
+esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n);
+
 // thing it does, so this is what to watch when the fit grows.
 size_t mag_cal_stack_free(void);
 

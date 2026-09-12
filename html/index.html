@@ -142,6 +142,11 @@
       </div>
     </section>
   </div>
+          <div class="buttons pair">
+            <button class="secondary" type="button" id="cal-save">Save calibration</button>
+            <button class="secondary" type="button" id="cal-load">Load calibration</button>
+            <input type="file" id="cal-file" accept=".csv,text/csv" hidden>
+          </div>
 
   <div id="panel-wifi" role="tabpanel" hidden>
     <section>
@@ -687,6 +692,36 @@ sphere.onpointerdown = e => {
   view.drag = [e.clientX, e.clientY, view.yaw, view.pitch];
   sphere.setPointerCapture(e.pointerId);
   animate();
+// The readings themselves, not the fitted parameters: they are what a later
+// session continues from, and what the offline tools in tools/ read.
+$('cal-save').onclick = () => {
+  const pts = view.cal && view.cal.points;
+  if (!pts || !pts.length) {
+    view.calError = 'No readings to save yet';
+    renderCal();
+    return;
+  }
+  const csv = 'seq,t_ms,x_ut,y_ut,z_ut\n' +
+    pts.map(([x, y, z], i) => `${i + 1},${i * 100},${x},${y},${z}`).join('\n') + '\n';
+  const d = new Date(), p2 = n => String(n).padStart(2, '0');
+  const name = `mag-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}` +
+    `-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}.csv`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'}));
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+$('cal-load').onclick = () => $('cal-file').click();
+$('cal-file').onchange = async e => {
+  const file = e.target.files[0];
+  e.target.value = '';  // so the same file can be chosen again
+  if (file) {
+    await calPost('/api/cal/points', await file.text());
+  }
+};
+
 };
 sphere.onpointermove = e => {
   if (!view.drag) return;

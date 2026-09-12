@@ -104,6 +104,7 @@ static float dist(const float a[3], const float b[3])
     float d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
     return sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
 }
+static bool fit_once;  // fit even without a session: readings were just loaded
 
 // Direction of v about c; false if v sits on it.
 static bool direction_from(const float c[3], const float v[3], float u[3])
@@ -567,8 +568,10 @@ static void cal_task(void *arg)
             fresh++;
             session_new++;
         }
-        bool due = state == MAG_CAL_RUNNING && fresh >= REFIT_AFTER && npoints >= MIN_FIT_POINTS &&
-                   esp_timer_get_time() - last_fit > FIT_EVERY_US;
+        bool due = npoints >= MIN_FIT_POINTS &&
+                   (fit_once || (state == MAG_CAL_RUNNING && fresh >= REFIT_AFTER &&
+                                 esp_timer_get_time() - last_fit > FIT_EVERY_US));
+        fit_once = false;
         bool save_due = state == MAG_CAL_RUNNING && esp_timer_get_time() - last_save > SAVE_EVERY_US;
         if (due) {
             fresh = 0;
@@ -702,3 +705,43 @@ bool mag_cal_apply(const float m[3], float b[3])
     }
     return true;
 }
+esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
+{
+    ESP_RETURN_ON_FALSE(started, ESP_ERR_INVALID_STATE, TAG, "calibration task not running");
+    ESP_RETURN_ON_FALSE(n > 0, ESP_ERR_INVALID_ARG, TAG, "no readings");
+    xSemaphoreTake(lock, portMAX_DELAY);
+    state = MAG_CAL_IDLE;  // a loaded set is not a session
+    session_id++;          // any fit still running belongs to the old set
+    npoints = 0;
+    have_fit = false;
+    fit_tidied = false;
+    stable_count = 0;
+    session_refused = 0;
+    for (size_t i = 0; i < n && i < MAG_CAL_MAX_POINTS; i++) {
+        points[npoints].v[0] = pts[i][0];
+        points[npoints].v[1] = pts[i][1];
+        points[npoints].v[2] = pts[i][2];
+        points[npoints].order = i;
+        points[npoints].cell = 0;
+        npoints++;
+    }
+    arrivals = npoints;
+    // Bin them about the best centre we have: a poor centre scatters readings
+    // into the wrong cells, where the per-cell cap then throws them away.
+    if (params.valid) {
+        memcpy(centre, params.offset, sizeof(centre));
+    } else {
+        range_centre(centre);
+    }
+    rebin();
+    fit_once = true;  // let the task fit them and re-bin about the result
+    update_progress();
+    points_dirty = true;
+    snprintf(message_buf, sizeof(message_buf),
+             "Loaded %u readings from a file, %.0f %% of directions covered. Continue calibration to fit them.",
+             npoints, coverage * 100);
+    ESP_LOGI(TAG, "loaded %u readings from a file", npoints);
+    xSemaphoreGive(lock);
+    return ESP_OK;
+}
+
