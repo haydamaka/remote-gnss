@@ -19,8 +19,11 @@ typedef struct {
     int16_t raw[3];       // X, Y, Z counts
 } magnetometer_sample_t;
 
-// About 100 s at 10 Hz, so a recorder rides out a WiFi dropout.
-#define MAGNETOMETER_HISTORY 1024
+// About 25 s at 10 Hz, so a recorder rides out a short WiFi dropout. It was
+// 1024, four times longer, which cost 16 kB of the 166 kB this chip has for
+// everything - the single largest buffer in the firmware, for a tolerance
+// nothing had ever needed.
+#define MAGNETOMETER_HISTORY 256
 
 // Finds a QMC5883P, QMC5883L or IST8310 on the I2C pins from menuconfig
 // "Remote GNSS → Magnetometer" and starts sampling it.
