@@ -70,17 +70,36 @@ CAPS = (("+X", (1, 0, 0)), ("-X", (-1, 0, 0)), ("+Y", (0, 1, 0)),
         ("-Y", (0, -1, 0)), ("+Z", (0, 0, 1)), ("-Z", (0, 0, -1)))
 CAP_COS = math.cos(math.radians(45))
 
-# Intake
+# Intake (CALIBRATION.md section 3.1)
 SATURATION_UT = np.array([1590.0, 1590.0, 2490.0])  # IST8310 range, less a margin
-HAMPEL_HALF = 2                # 5-sample window
-HAMPEL_SIGMAS = 5.0
-HAMPEL_FLOOR_UT = 2.0          # MAD floor. 0.5 µT (still-signal noise) dropped genuine samples at
-                               # the turning points of fast hand rotation in the IST8310 recording
+GLITCH_SIGMAS = 3.0            # (b) gate = max(3 sigma, GLITCH_MOTION_SHARE * recent median |dm|)
+GLITCH_MOTION_SHARE = 0.5
+GLITCH_RETURN = 0.5            # ...and the next sample must come back within this share of the jump
+MOTION_MAX_UT = 40.0           # (c) the chip samples its three axes in sequence, so a vector moving
+                               # this fast per sample is smeared across them rather than measured.
+                               # 15 µT (CALIBRATION.md) costs a third of a brisk rotation for a
+                               # smear of 0.9 µT; the residual only rises past 40 (see tools/).
+AGREE_SHARE_OF_R = 0.02        # (d) a cell's readings must agree within max(3 sigma, 2 % of R)
+AGREE_SIGMAS = 3.0
 NOISE_WINDOW = 20
 NOISE_DEFAULT_UT = 0.5         # until a quiet window has been seen
 NOISE_FLOOR_UT = 0.1
+NOISE_MAX_UT = 1.5             # a motion-polluted estimate must not disable the fit criterion
+NOISE_QUIET_UT = 1.5           # a window counts as quiet only below this median |dm| per sample
 PRE_FIT_STILL_UT = 5.0         # before the first fit, samples this close to the min/max
                                # midpoint are binned by their raw direction instead
+
+# Post-processing (section 3.1 d2)
+TIDY_MIN_KEEP = 0.70
+TIDY_MIN_GAIN = 0.10           # the error must fall by at least a tenth
+TIDY_MAX_SHIFT_UT = 1.0        # ...without moving the centre, or it is inventing an answer
+
+# Eviction (section 3.2)
+EVICT_MIN_INLIERS = 0.70       # worst-residual eviction needs a fit most readings agree with
+EVICT_NEWCOMER_BIAS = 1.5      # a newcomer this much worse than the stored worst is refused
+
+# Which stages are on. The report harness flips these to measure them one at a time.
+FILTERS = dict(glitch=True, motion=True, agree=True, tidy=True, evict=True, medians=False)
 
 # Buffer
 K_PER_CELL = 4
@@ -431,13 +450,19 @@ class Calibrator:
         self.buf_t = np.zeros(BUFFER_SIZE)
         self.buf_cell = np.full(BUFFER_SIZE, -1)
         self.buf_used = np.zeros(BUFFER_SIZE, dtype=bool)
-        self.window = deque(maxlen=2 * HAMPEL_HALF + 1)
+        self.window = deque(maxlen=3)   # a reading is judged against its two neighbours
+        self.motion_recent = deque(maxlen=NOISE_WINDOW)
         self.noise_recent = deque(maxlen=NOISE_WINDOW)
         self.noise_ut = None
         self.monitor_flags = deque(maxlen=MONITOR_WINDOW)
         self.monitor_res = deque(maxlen=MONITOR_WINDOW)
         self.t0 = None
         self.seen = self.spikes = self.refused = self.restarts = 0
+        # intake tallies, by the stage that turned the reading away
+        self.dropped = dict(saturated=0, glitch=0, motion=0)
+        self.tidied = 0         # fits improved by the d2 refit on their own inliers
+        self.disagreed = 0      # (d): joined its cell by replacing a member instead of adding
+        self.evict_refused = 0  # a newcomer worse than the worst already stored
         self.stream = []        # (t, m, dropped) for the report and plot
         self.timeline = []      # (t, cells, fit, inliers, level, state)
         self.events = []        # (t, text)
@@ -467,42 +492,69 @@ class Calibrator:
         t = (t_ms - self.t0) / 1000.0
         m = np.asarray(m, dtype=float)
         self.seen += 1
-        if np.any(np.abs(m) >= SATURATION_UT):
-            self.spikes += 1
-            self.stream.append((t, m, True))
+        if np.any(np.abs(m) >= SATURATION_UT):  # (a) out of range: the reading is a clipped stub
+            self._drop(t, m, "saturated")
             return
         self.window.append((t, m))
         if len(self.window) < self.window.maxlen:
             return
-        t_mid, m_mid = self.window[HAMPEL_HALF]
-        block = np.array([x for _, x in self.window])
-        med = np.median(block, axis=0)
-        mad = 1.4826 * np.median(np.abs(block - med), axis=0)
-        if np.any(np.abs(m_mid - med) > HAMPEL_SIGMAS * np.maximum(mad, HAMPEL_FLOOR_UT)):
-            self.spikes += 1
-            self.stream.append((t_mid, m_mid, True))
+        (_, m_prev), (t_mid, m_mid), (_, m_next) = self.window
+        self._update_noise(m_mid)  # the raw run, so the differences stay contiguous
+
+        # (b) A glitch stands away from the line its neighbours draw and then comes
+        # back; a genuine turn leaves the next reading on the far side. The gate has
+        # to grow with the rotation, or fast sweeps look like glitches at every bend.
+        if FILTERS["glitch"]:
+            step = m_next - m_prev
+            away = float(np.linalg.norm(m_mid - (m_prev + m_next) / 2))
+            gate = max(GLITCH_SIGMAS * self.noise(), GLITCH_MOTION_SHARE * self.motion())
+            if away > gate and float(np.linalg.norm(step)) < GLITCH_RETURN * 2 * away:
+                self._drop(t_mid, m_mid, "glitch")
+                return
+
+        # (c) The chip samples x, y and z one after another, so a vector that moves
+        # this far between readings is smeared across the axes rather than measured.
+        move = float(np.linalg.norm(m_mid - m_prev))
+        if FILTERS["motion"] and move > MOTION_MAX_UT:
+            self.motion_recent.append(move)
+            self._drop(t_mid, m_mid, "motion")
             return
+        self.motion_recent.append(move)
         self.stream.append((t_mid, m_mid, False))
         self._take(t_mid, m_mid)
+
+    def _drop(self, t, m, why):
+        self.dropped[why] += 1
+        self.spikes += 1
+        self.stream.append((t, m, True))
 
     def finish(self):
         pass
 
     def _update_noise(self, m):
-        """Noise from second differences (they cancel steady rotation), quietest window wins."""
+        """Noise from second differences, which cancel a steady rotation: the quietest
+        window of the session wins. The window must actually be quiet — over a fast
+        sweep the second difference measures the turn, not the sensor, and taking that
+        for noise widens every gate sized from it, the fit criterion most of all."""
         self.noise_recent.append(m)
-        if len(self.noise_recent) == NOISE_WINDOW:
-            x = np.array(self.noise_recent)
-            d2 = x[2:] - 2 * x[1:-1] + x[:-2]
-            sigma = float(np.max(1.4826 * np.median(np.abs(d2), axis=0) / math.sqrt(6)))
-            sigma = max(sigma, NOISE_FLOOR_UT)
-            self.noise_ut = sigma if self.noise_ut is None else min(self.noise_ut, sigma)
+        if len(self.noise_recent) < NOISE_WINDOW:
+            return
+        x = np.array(self.noise_recent)
+        if float(np.median(np.linalg.norm(np.diff(x, axis=0), axis=1))) > NOISE_QUIET_UT:
+            return
+        d2 = x[2:] - 2 * x[1:-1] + x[:-2]
+        sigma = float(np.max(1.4826 * np.median(np.abs(d2), axis=0) / math.sqrt(6)))
+        sigma = min(max(sigma, NOISE_FLOOR_UT), NOISE_MAX_UT)
+        self.noise_ut = sigma if self.noise_ut is None else min(self.noise_ut, sigma)
 
     def noise(self):
         return self.noise_ut if self.noise_ut is not None else NOISE_DEFAULT_UT
 
+    def motion(self):
+        """Recent median distance between readings: how fast the vector is moving."""
+        return float(np.median(self.motion_recent)) if self.motion_recent else 0.0
+
     def _take(self, t, m):
-        self._update_noise(m)
         ref = self.accepted if (self.accepted is not None and not self.accepted_stale) else (
             self.fit.model if self.cover_ok else None)
         if ref is not None:
@@ -547,18 +599,71 @@ class Calibrator:
         n = np.linalg.norm(v)
         return v / n if n > 0 else np.array([0.0, 0.0, 1.0])
 
-    def _evictee(self, slots):
-        """Worst sample of a full cell if it's an outlier (once coverage passes), else the oldest."""
-        if self.cover_ok:
+    def _fit_trusted(self):
+        """Whether the current fit is worth ranking readings by: it has to be a
+        physical sphere that most of the buffer already agrees with."""
+        return (self.fit is not None and plausible_for_binning(self.fit.model)
+                and float(self.fit.mask.mean()) >= EVICT_MIN_INLIERS)
+
+    def _evictee(self, slots, m_new=None, least_agreeing=None):
+        """Which member of a crowded cell gives way. Once there is a fit worth
+        trusting that is the one disagreeing most with it, so a cell settles on its
+        best readings rather than merely its latest; before then, the reading that
+        agrees least with the cell, or failing that the oldest. A newcomer clearly
+        worse than everything already stored is turned away instead (None)."""
+        if FILTERS["evict"] and self._fit_trusted():
             r = np.abs(self.fit.model.residuals(self.buf_m[slots]))
-            if r.max() > self.fit.gate:
-                return int(slots[np.argmax(r)])
+            worst = int(np.argmax(r))
+            if m_new is not None:
+                r_new = abs(self.fit.model.residuals(m_new[None])[0])
+                if r_new > EVICT_NEWCOMER_BIAS * r[worst]:
+                    self.evict_refused += 1
+                    return None
+            return int(slots[worst])
+        if least_agreeing is not None:
+            return least_agreeing
         return int(slots[np.argmin(self.buf_t[slots])])
+
+    def _scale(self):
+        """Working estimate of R, for gates that are a share of it."""
+        if self.fit is not None and plausible_for_binning(self.fit.model):
+            return self.fit.model.radius()
+        if self.lo is None:
+            return NOISE_DEFAULT_UT / AGREE_SHARE_OF_R
+        return max(float(np.mean(self.hi - self.lo)) / 2, R_MIN)
+
+    def _centre(self):
+        if self.fit is not None and plausible_for_binning(self.fit.model):
+            return self.fit.model.o
+        return np.zeros(3) if self.lo is None else (self.lo + self.hi) / 2
+
+    def _disagrees(self, m, same):
+        """(d) A cell is one direction, so its readings should all sit the same
+        distance from the centre; how far apart they are as vectors only says where
+        within the cell they fell. One that disagrees on that distance was taken in a
+        different field, so it does not join the cell as extra evidence — it competes
+        for a place in it. Returns the member that agrees least, or None if it fits in."""
+        if not FILTERS["agree"] or len(same) == 0:
+            return None
+        c = self._centre()
+        d = np.linalg.norm(self.buf_m[same] - c, axis=1)
+        med = float(np.median(d))
+        tol = max(AGREE_SIGMAS * self.noise(), AGREE_SHARE_OF_R * self._scale())
+        if abs(float(np.linalg.norm(m - c)) - med) <= tol:
+            return None
+        self.disagreed += 1
+        return int(same[np.argmax(np.abs(d - med))])
 
     def _insert(self, t, m):
         cell = cell_of(self._direction(m))
         same = np.flatnonzero(self.buf_used & (self.buf_cell == cell))
-        slot = int(np.flatnonzero(~self.buf_used)[0]) if len(same) < K_PER_CELL else self._evictee(same)
+        loser = self._disagrees(m, same)
+        if loser is None and len(same) < K_PER_CELL:
+            slot = int(np.flatnonzero(~self.buf_used)[0])
+        else:
+            slot = self._evictee(same, m, loser)
+            if slot is None:
+                return
         self.buf_m[slot], self.buf_t[slot], self.buf_cell[slot], self.buf_used[slot] = m, t, cell, True
 
     def _survivors(self, model):
@@ -579,6 +684,15 @@ class Calibrator:
 
     def buffer(self):
         return self.buf_m[self.buf_used]
+
+    def fit_points(self):
+        """What the fit sees. With per-cell medians, one point per cell instead of up
+        to four: fewer points, each quieter, but the spread inside a cell is lost."""
+        if not FILTERS["medians"]:
+            return self.buffer()
+        idx = np.flatnonzero(self.buf_used)
+        cells = self.buf_cell[idx]
+        return np.array([np.median(self.buf_m[idx[cells == c]], axis=0) for c in np.unique(cells)])
 
     # ----- fitting
     def _fit_from(self, start, m):
@@ -629,7 +743,7 @@ class Calibrator:
 
     def _refit(self, t):
         self.since_refit = 0
-        fit = self._fit(self.buffer())
+        fit = self._fit(self.fit_points())
         if fit is None:
             self._record(t, None, "no fit")
             return
@@ -639,9 +753,12 @@ class Calibrator:
             if kept >= total / 2:  # a model that would evict half the buffer is not trusted
                 self.bin_model = fit.model
                 self._rebin()
-        m = self.buffer()
+        m = self.fit_points()
         mask, gate = gate_inliers(fit.model.residuals(m), self.noise() / fit.model.radius())
         self.fit = Fit(fit.model, mask, gate)
+        tidied = self._tidy(m)   # the firmware tidies at every fit, not only on accept
+        if tidied is not None:
+            self.fit = tidied
         crit, metrics = evaluate(self.fit, m, self.noise())
         self.last_crit, self.last_metrics = crit, metrics
         self.cover_ok = next(ok for name, ok, _, _ in crit if name == "coverage")
@@ -669,6 +786,26 @@ class Calibrator:
         if not fails and not stable:
             fails = ["stability"]
         self._record(t, metrics, ",".join(fails) or "-")
+
+    def _tidy(self, m):
+        """Section 3.1 d2: one last fit on the readings the fit kept. Dropping the
+        outliers and refitting is only honest if the fit kept most of the session,
+        the refit buys a real improvement, and the centre stays put; otherwise it is
+        reshaping the answer around whichever readings happened to survive."""
+        if not FILTERS["tidy"] or self.fit is None:
+            return None
+        kept = m[self.fit.mask]
+        if len(kept) < MIN_FIT_SAMPLES or len(kept) < TIDY_MIN_KEEP * len(m):
+            return None
+        tidied = self._fit_from(self.fit.model, kept)
+        if tidied is None:
+            return None
+        if (tidied.rms(kept) > (1 - TIDY_MIN_GAIN) * self.fit.rms(m)
+                or float(np.linalg.norm(tidied.model.o - self.fit.model.o)) >= TIDY_MAX_SHIFT_UT):
+            return None
+        self.tidied += 1
+        mask, gate = gate_inliers(tidied.model.residuals(m), self.noise() / tidied.model.radius())
+        return Fit(tidied.model, mask, gate)
 
     def _accept(self, t, model, what):
         self.accepted = Model(model.o.copy(), model.W.copy(), model.level)
@@ -1010,8 +1147,13 @@ def run(estimator, t_ms, m, checkpoint_s=1.0):
 
 def report_ours(cal, out=print):
     out("")
-    out(f"== ours: state {cal.state()}, {cal.seen} samples, {cal.spikes} dropped as spikes, "
-        f"{cal.refused} refused by the inlier gate, {cal.restarts} restart(s)")
+    d = cal.dropped
+    out(f"== ours: state {cal.state()}, {cal.seen} samples, {cal.spikes} dropped at intake "
+        f"({d['saturated']} saturated, {d['glitch']} glitches, {d['motion']} too fast), "
+        f"{cal.refused} refused by the inlier gate, {cal.evict_refused} worse than the cell, "
+        f"{cal.disagreed} replaced a cell member, {cal.restarts} restart(s)")
+    out(f"   noise sigma {cal.noise():.3f} µT"
+        + ("" if cal.noise_ut is not None else " (assumed: no quiet window in the session)"))
     for t, text in cal.events:
         out(f"   t={t:7.1f}s {text}")
     model = cal.accepted if cal.accepted is not None else (cal.fit.model if cal.fit else None)
@@ -1259,6 +1401,12 @@ def main():
     if len(m) == 0:
         ap.error(f"no samples in {args.csv}")
     print(f"{args.csv}: {len(m)} samples over {(t_ms[-1] - t_ms[0]) / 1000:.1f} s")
+    dt = np.diff(t_ms)
+    if len(dt) > 10 and np.all(dt == dt[0]):
+        print(f"   WARNING: every timestamp is exactly {dt[0]} ms apart, so this is a buffer"
+              f"\n   snapshot (a /api/cal export), not a recorded stream. Neighbouring rows are"
+              f"\n   slots, not moments: the section 3.1 intake filters judge a reading against"
+              f"\n   its neighbours in time and mean nothing here. Only the fit is meaningful.")
     progress = args.progress or "all"
     ests = make_estimators(args.method, args.seed, progress)
     for est in ests:
