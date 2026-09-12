@@ -30,3 +30,10 @@ for it to rejoin WiFi before driving it over the network.
 
 `main/wifi_credentials.h` holds the WiFi password and is kept out of git. Never
 commit it, and never print its contents.
+
+## Updating over WiFi
+
+The board need not be on USB: `idf.py build` then
+`curl -X POST --data-binary @build/remote-gnss.bin http://gnss-haydamaka.local/api/ota`.
+It restarts into the new image by itself. Only a change to `partitions.csv`
+needs USB.

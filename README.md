@@ -29,6 +29,22 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash monitor
 ```
 
+## Updating over WiFi
+
+After the first USB flash, firmware goes over the network:
+
+```sh
+idf.py build
+curl -X POST --data-binary @build/remote-gnss.bin http://gnss-haydamaka.local/api/ota
+```
+
+The device checks the image before it takes it, restarts into it and keeps its
+settings; a bad image leaves the running firmware alone. `curl -X POST
+http://gnss-haydamaka.local/api/restart` just restarts it.
+
+The partition table (`partitions.csv`) holds two app slots for this, so the
+first flash after changing it must go over USB.
+
 ## CLion
 
 1. Settings → Build, Execution, Deployment → Toolchains: add a toolchain named `ESP-IDF`,

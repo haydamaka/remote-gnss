@@ -16,9 +16,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+
 #include "gnss.h"
 #include "mag_cal.h"
 #include "magnetometer.h"
+#include "ota.h"
 #include "wifi.h"
 
 static const char *TAG = "web";
@@ -271,9 +275,14 @@ static esp_err_t status_get(httpd_req_t *req)
     json_int(&j, "fallback_s", CONFIG_RGNSS_STA_FALLBACK_S);
     json_close(&j);
 
+    const esp_app_desc_t *app = esp_app_get_description();
+    char built[40];
+    snprintf(built, sizeof(built), "%s %s", app->date, app->time);
     json_open(&j, "system");
     json_int(&j, "uptime_s", esp_timer_get_time() / 1000000);
     json_str(&j, "reset", reset_reason());
+    json_str(&j, "built", built);
+    json_str(&j, "partition", esp_ota_get_running_partition()->label);
     json_close(&j);
 
     json_close(&j);
@@ -400,6 +409,62 @@ static esp_err_t cal_stop_post(httpd_req_t *req)
     return reply(req, HTTPD_200, NULL);
 }
 
+// Firmware update over WiFi: POST the .bin. The image is checked before the
+// bootloader is pointed at it, and a bad one leaves the running firmware alone.
+static esp_err_t ota_post(httpd_req_t *req)
+{
+    static char chunk[2048];
+    size_t total = req->content_len;
+    if (total < 4096) {
+        return reply(req, HTTPD_400, "Too small to be a firmware image");
+    }
+    if (ota_begin(total) != ESP_OK) {
+        return reply(req, HTTPD_500, "Could not start the update");
+    }
+    size_t got = 0;
+    int timeouts = 0;
+    while (got < total) {
+        size_t want = total - got < sizeof(chunk) ? total - got : sizeof(chunk);
+        int n = httpd_req_recv(req, chunk, want);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) {
+            if (++timeouts > 5) {
+                ota_abort();
+                return reply(req, HTTPD_400, "The upload stalled");
+            }
+            continue;
+        }
+        if (n <= 0) {
+            ota_abort();
+            return ESP_FAIL;
+        }
+        if (got == 0 && (unsigned char)chunk[0] != 0xE9) {  // ESP image magic
+            ota_abort();
+            return reply(req, HTTPD_400, "Not an ESP32 firmware image");
+        }
+        if (ota_write(chunk, n) != ESP_OK) {
+            ota_abort();
+            return reply(req, HTTPD_500, "Could not write the image");
+        }
+        timeouts = 0;
+        got += n;
+    }
+    if (ota_finish() != ESP_OK) {
+        return reply(req, HTTPD_400, "The image was rejected");
+    }
+    ESP_LOGI(TAG, "update installed, restarting");
+    reply(req, HTTPD_200, NULL);
+    restart_soon();
+    return ESP_OK;
+}
+
+static esp_err_t restart_post(httpd_req_t *req)
+{
+    ESP_LOGI(TAG, "restart requested");
+    reply(req, HTTPD_200, NULL);
+    restart_soon();
+    return ESP_OK;
+}
+
 static esp_err_t wifi_post(httpd_req_t *req)
 {
     char body[512];
@@ -460,6 +525,8 @@ esp_err_t webserver_start(void)
         {.uri = "/api/cal", .method = HTTP_GET, .handler = cal_get},
         {.uri = "/api/cal/start", .method = HTTP_POST, .handler = cal_start_post},
         {.uri = "/api/cal/stop", .method = HTTP_POST, .handler = cal_stop_post},
+        {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
+        {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
         {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = forget_post},
     };

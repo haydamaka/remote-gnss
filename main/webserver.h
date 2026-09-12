@@ -11,6 +11,8 @@
 //   POST /api/cal/start     start a calibration session; continues from the
 //                           saved readings unless ?fresh=1
 //   POST /api/cal/stop      interrupt it
+//   POST /api/ota           a firmware .bin as the body: install it and restart
+//   POST /api/restart       restart the device
 //   POST /api/wifi          ssid, password (form-encoded): save and reboot
 //   POST /api/wifi/forget   drop the saved network and reboot
 esp_err_t webserver_start(void);
