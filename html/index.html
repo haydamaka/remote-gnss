@@ -22,8 +22,16 @@
     position: sticky; top: 0; display: flex; align-items: center; gap: 12px;
     padding: 10px 16px; background: var(--card); border-bottom: 1px solid var(--line);
   }
-  h1 { flex: 1; margin: 0; font-size: 17px; }
+  h1 { flex: 1; margin: 0; font-size: 17px; white-space: nowrap; }
   nav { display: flex; gap: 4px; }
+  /* A third tab with a long name does not fit beside the title on a phone:
+     give the tabs their own row rather than pushing one off the screen. */
+  @media (max-width: 560px) {
+    header { flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
+    h1 { flex: 1 0 auto; font-size: 16px; }
+    nav { flex: 1 0 100%; }
+    nav button { flex: 1; padding-inline: 4px; font-size: 12px; }
+  }
   nav button {
     padding: 6px 14px; border: 0; border-radius: 8px; background: none;
     color: var(--muted); font: inherit; font-weight: 600; cursor: pointer;
@@ -92,6 +100,16 @@
   .learn input[type=checkbox] { width: auto; margin: 0; }
   .learn .buttons { margin: 0; }
   .learn .note { flex: 1 0 100%; margin: 0; }
+  /* The compass tab: one column, sized to the phone it is held in. */
+  .compass-view { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  #compass { width: 100%; max-width: 340px; aspect-ratio: 1; touch-action: manipulation; }
+  .compass-view .desired { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+                           justify-content: center; font-size: 15px; color: var(--muted); }
+  .compass-view .desired input { width: 5em; text-align: right; padding: 8px 10px; }
+  .compass-view .desired button { padding: 8px 14px; border-radius: 8px; font: inherit; cursor: pointer; }
+  .compass-view .note { margin: 0; min-height: 1.4em; font-size: 15px; text-align: center; }
+  .compass-view .note.off { color: var(--accent); font-weight: 600; }
+  .fixinfo { width: 100%; max-width: 340px; }
   .bar { height: 8px; margin: 6px 0; overflow: hidden; background: var(--line); border-radius: 4px; }
   .bar > div { width: 0; height: 100%; background: var(--accent); transition: width .3s; }
   /* Wide screens: Position and Magnetometer side by side, equally tall. */
@@ -107,14 +125,37 @@
 <header>
   <h1>remote-gnss</h1>
   <nav role="tablist">
-    <button role="tab" data-tab="gnss" aria-selected="true">GNSS</button>
+    <button role="tab" data-tab="compass" aria-selected="true">Compass</button>
+    <button role="tab" data-tab="gnss" aria-selected="false">GNSS/Magnetometer</button>
     <button role="tab" data-tab="wifi" aria-selected="false">WiFi/BLE</button>
   </nav>
 </header>
 <div id="offline" hidden>The device isn't responding</div>
 
 <main>
-  <div id="panel-gnss" role="tabpanel">
+  <div id="panel-compass" role="tabpanel">
+    <section class="compass-view">
+      <canvas id="compass" role="img" aria-label="Compass card showing the current heading"></canvas>
+      <p class="status bad" id="c-warn" hidden></p>
+      <div class="desired">
+        <label for="c-target">Desired heading</label>
+        <input type="number" id="c-target" min="0" max="359" step="1" inputmode="numeric"
+               placeholder="—" aria-describedby="c-error">
+        <span>°</span>
+        <button class="secondary" type="button" id="c-clear">Clear</button>
+      </div>
+      <p class="note" id="c-error" role="status"></p>
+      <table class="fixinfo">
+        <tr><th>Fix</th><td id="c-fix">—</td></tr>
+        <tr><th>Latitude</th><td id="c-lat">—</td></tr>
+        <tr><th>Longitude</th><td id="c-lon">—</td></tr>
+        <tr><th>Altitude</th><td id="c-alt">—</td></tr>
+        <tr><th>Speed</th><td id="c-speed">—</td></tr>
+      </table>
+    </section>
+  </div>
+
+  <div id="panel-gnss" role="tabpanel" hidden>
     <section>
       <h2>Position</h2>
       <p class="status" id="gnss-status">Loading…</p>
@@ -296,9 +337,10 @@ function selectTab(name) {
   for (const b of document.querySelectorAll('[role=tab]')) {
     b.setAttribute('aria-selected', b.dataset.tab === name);
   }
+  $('panel-compass').hidden = name !== 'compass';
   $('panel-gnss').hidden = name !== 'gnss';
   $('panel-wifi').hidden = name !== 'wifi';
-  history.replaceState(null, '', name === 'gnss' ? location.pathname : '#' + name);
+  history.replaceState(null, '', name === 'compass' ? location.pathname : '#' + name);
   if (view.cal && view.cal.state === 'running') animate(); else draw();
 }
 for (const b of document.querySelectorAll('[role=tab]')) {
@@ -313,6 +355,44 @@ function status(el, text, cls) {
   el.className = 'status ' + cls;
 }
 
+// How far off the heading being steered for, as a turn rather than a signed
+// number. "Deviation" is avoided on purpose: in this project that word already
+// means the magnetic A-E coefficients of BEARING-CALIBRATION.md.
+function renderSteer() {
+  const el = $('c-error');
+  if (view.target == null) {
+    el.textContent = 'Set a heading to steer for, and this will say how far off you are.';
+    el.classList.remove('off');
+    return;
+  }
+  if (view.heading == null) {
+    el.textContent = 'No magnetometer reading yet.';
+    el.classList.remove('off');
+    return;
+  }
+  const err = ((view.target - view.heading + 540) % 360) - 180;
+  const mag = Math.abs(err);
+  const to = String(Math.round(view.target) % 360).padStart(3, '0');
+  // At a half turn the direction is arbitrary, so don't pick one.
+  el.textContent = mag < 1 ? `On ${to}°`
+    : mag > 179.5 ? `Turn 180° to reach ${to}°`
+    : `Turn ${err > 0 ? 'right' : 'left'} ${mag.toFixed(0)}° to reach ${to}°`;
+  el.classList.toggle('off', mag >= 1);
+}
+
+$('c-target').oninput = () => {
+  const v = parseFloat($('c-target').value);
+  view.target = isFinite(v) ? ((v % 360) + 360) % 360 : null;
+  renderSteer();
+  animate();
+};
+$('c-clear').onclick = () => {
+  $('c-target').value = '';
+  view.target = null;
+  renderSteer();
+  animate();
+};
+
 function renderGnss(g) {
   const el = $('gnss-status');
   if (g.age_ms == null || g.age_ms > 3000) {
@@ -322,9 +402,18 @@ function renderGnss(g) {
   } else {
     status(el, `${QUALITY[g.quality] || 'Fix'} · ${g.sats} satellites`, 'ok');
   }
+  $('c-fix').textContent = g.age_ms == null || g.age_ms > 3000 ? 'No data'
+    : !g.fix ? `No fix · ${g.sats} satellites` : `${QUALITY[g.quality] || 'Fix'} · ${g.sats} satellites`;
+  $('c-lat').textContent = $('lat').textContent;
+  $('c-lon').textContent = $('lon').textContent;
+  $('c-alt').textContent = $('alt').textContent;
+  $('c-speed').textContent = $('speed').textContent;
+
   // Two independent detectors: the receiver's own, and whether the fix is possible at all.
   const warnings = [SPOOF[g.spoof], g.implausible ? g.implausible_why : null].filter(Boolean);
   $('gnss-warn').hidden = !warnings.length;
+  $('c-warn').hidden = !warnings.length;
+  $('c-warn').textContent = warnings.length ? 'These satellite signals look faked.' : '';
   $('gnss-warn').textContent = warnings.length
     ? `These satellite signals look faked: ${warnings.join('; ')}. Position and time are not to be trusted.`
     : '';
@@ -480,7 +569,7 @@ document.getElementById('ble-off').addEventListener('click', async () => {
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
-const view = {cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
+const view = {cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
               fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -640,19 +729,99 @@ function drawArrow(g, from, to, colour) {
   g.fill();
 }
 
-function draw() {
-  const cv = $('plot'), c = view.cal;
-  const size = cv.clientWidth, dpr = window.devicePixelRatio || 1;
-  if (!size || !c) return;
-  if (cv.width !== Math.round(size * dpr)) cv.width = cv.height = Math.round(size * dpr);
+// A canvas sized from its CSS box, ready to draw into. Null when it is hidden,
+// which leaves it zero-wide.
+function surface(id) {
+  const cv = $(id), size = cv.clientWidth, dpr = window.devicePixelRatio || 1;
+  if (!size) return null;
+  const px = Math.round(size * dpr);
+  if (cv.width !== px) cv.width = cv.height = px;
   const g = cv.getContext('2d');
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, size, size);
-  if (view.mode === 'compass') {
-    drawCompass(g, size, c);
-  } else {
-    drawSphere(g, size, c);
+  return {g, size};
+}
+
+function draw() {
+  const big = surface('compass');
+  if (big) {
+    drawBigCompass(big.g, big.size);
   }
+  const s = surface('plot');
+  if (s && view.cal) {
+    if (view.mode === 'compass') {
+      drawCompass(s.g, s.size, view.cal);
+    } else {
+      drawSphere(s.g, s.size, view.cal);
+    }
+  }
+}
+
+// The compass tab's own card: bigger, so it can carry the azimuth numbers, and
+// it marks the heading the user is steering for.
+function drawBigCompass(g, size) {
+  const cx = size / 2, cy = size / 2, r = size / 2 - 22;
+  const fg = colour('fg'), muted = colour('muted'), accent = colour('accent');
+  const h = view.heading == null ? 0 : view.heading;
+  const known = view.heading != null;
+  g.lineCap = 'butt';
+
+  // The index mark: the direction the module points, always at the top.
+  g.fillStyle = fg;
+  g.beginPath();
+  g.moveTo(cx, cy - r - 16); g.lineTo(cx - 7, cy - r - 4); g.lineTo(cx + 7, cy - r - 4);
+  g.closePath(); g.fill();
+
+  g.strokeStyle = muted;
+  g.globalAlpha = known ? 1 : 0.35;
+  g.lineWidth = 1;
+  g.beginPath(); g.arc(cx, cy, r, 0, 2 * Math.PI); g.stroke();
+
+  // Ticks every 5 degrees, numbers every 30.
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  for (let a = 0; a < 360; a += 5) {
+    const t = (a - h) * Math.PI / 180;
+    const sin = Math.sin(t), cos = Math.cos(t);
+    const major = a % 30 === 0, mid = a % 10 === 0;
+    const len = major ? 11 : mid ? 7 : 4;
+    g.strokeStyle = major ? fg : muted;
+    g.lineWidth = major ? 2 : 1;
+    g.beginPath();
+    g.moveTo(cx + sin * r, cy - cos * r);
+    g.lineTo(cx + sin * (r - len), cy - cos * (r - len));
+    g.stroke();
+    if (major) {
+      const rr = r - 24;
+      const cardinal = {0: 'N', 90: 'E', 180: 'S', 270: 'W'}[a];
+      g.fillStyle = a === 0 ? '#e5484d' : cardinal ? fg : muted;
+      g.font = cardinal ? `bold ${Math.round(size / 17)}px system-ui, sans-serif`
+                        : `${Math.round(size / 24)}px system-ui, sans-serif`;
+      g.fillText(cardinal || String(a).padStart(3, '0'), cx + sin * rr, cy - cos * rr);
+    }
+  }
+
+  // The heading being steered for, as a bug on the ring plus a line to it.
+  if (view.target != null && known) {
+    const t = (view.target - h) * Math.PI / 180, sin = Math.sin(t), cos = Math.cos(t);
+    g.strokeStyle = g.fillStyle = accent;
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(cx, cy); g.lineTo(cx + sin * (r - 13), cy - cos * (r - 13)); g.stroke();
+    g.beginPath();
+    g.moveTo(cx + sin * r, cy - cos * r);
+    g.lineTo(cx + sin * (r + 11) - cos * 7, cy - cos * (r + 11) - sin * 7);
+    g.lineTo(cx + sin * (r + 11) + cos * 7, cy - cos * (r + 11) + sin * 7);
+    g.closePath(); g.fill();
+  }
+
+  g.globalAlpha = 1;
+  g.fillStyle = fg;
+  g.font = `bold ${Math.round(size / 6)}px system-ui, sans-serif`;
+  g.fillText(known ? `${Math.round(h) % 360}°` : '—', cx, cy - size / 40);
+  g.fillStyle = muted;
+  g.font = `${Math.round(size / 18)}px system-ui, sans-serif`;
+  g.fillText(known ? CARDINALS[Math.round(h / 45) % 8] : 'no reading', cx, cy + size / 9);
 }
 
 // A compass card: the ring turns so that N sits at magnetic north, while the
@@ -782,15 +951,17 @@ function drawSphere(g, size, c) {
 }
 
 function frame() {
+  const onCompass = !$('panel-compass').hidden;
   const spinning = view.mode === 'sphere' && view.cal && view.cal.state === 'running';
-  const settling = view.mode === 'compass' && Math.abs(headingError()) > 0.2;
+  const settling = (onCompass || view.mode === 'compass') && Math.abs(headingError()) > 0.2;
   // A hidden tab or panel leaves the canvas zero-wide: stop until it's shown again.
-  if ((!spinning && !settling && !view.drag) || document.hidden || !$('plot').clientWidth) {
+  const visible = $('plot').clientWidth || $('compass').clientWidth;
+  if ((!spinning && !settling && !view.drag) || document.hidden || !visible) {
     view.animating = false;
     draw();
     return;
   }
-  if (view.mode === 'compass') {
+  if (onCompass || view.mode === 'compass') {
     view.heading = (view.heading + headingError() * 0.25 + 360) % 360;  // ease, don't jump
   } else if (!view.drag) {
     view.yaw += 0.005;
@@ -922,7 +1093,8 @@ async function pollCal() {
 // Only the latest reading matters here, so each request skips to the newest.
 // Idle unless the plot is actually on screen: this runs on phones.
 async function pollLive() {
-  const showing = !document.hidden && !$('panel-gnss').hidden && !$('cal').hidden;
+  const showing = !document.hidden &&
+                  (!$('panel-compass').hidden || (!$('panel-gnss').hidden && !$('cal').hidden));
   if (showing) {
     try {
       const r = await fetch(`/api/mag/samples?since=${view.since}`, {cache: 'no-store', signal: AbortSignal.timeout(3000)});
@@ -934,7 +1106,9 @@ async function pollLive() {
         view.headingRaw = (Math.atan2(b[1], b[0]) * 180 / Math.PI + 360) % 360;
         view.headingAt = Date.now();
         view.headingTarget = corrected(view.headingRaw);
-        if (view.mode === 'compass') animate(); else if (!view.animating) draw();
+        renderSteer();
+        if (view.mode === 'compass' || !$('panel-compass').hidden) animate();
+        else if (!view.animating) draw();
       }
       view.since = j.seq;
       view.skip = false;
@@ -1093,12 +1267,14 @@ sphere.onpointermove = e => {
 };
 sphere.onpointerup = sphere.onpointercancel = sphere.onlostpointercapture = () => { view.drag = null; };
 
-addEventListener('hashchange', () => selectTab(location.hash === '#wifi' ? 'wifi' : 'gnss'));
+const tabFromHash = () => ({'#wifi': 'wifi', '#gnss': 'gnss'})[location.hash] || 'compass';
+addEventListener('hashchange', () => selectTab(tabFromHash()));
 addEventListener('visibilitychange', () => {
   if (!document.hidden && view.cal && view.cal.state === 'running') animate();
 });
 
-selectTab(location.hash === '#wifi' ? 'wifi' : 'gnss');
+selectTab(tabFromHash());
+renderSteer();
 poll();
 pollCal();
 pollBearing();

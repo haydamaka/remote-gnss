@@ -54,8 +54,13 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
 - HTTP server on port 80.
 - The page source is a separate file in `html/`, embedded in the firmware at
   build time (not inline in C).
-- Two tabs:
-  - **GNSS** (opens by default): coordinates and magnetometer readings as text,
+- Three tabs:
+  - **Compass** (opens by default): a large compass card with azimuth markings
+    every 30°, the heading read out in the middle, and the basic fix underneath
+    — quality, satellites, position, altitude, speed. A **desired heading** box
+    marks that bearing on the card and says which way to turn to reach it. No
+    configuration of any kind, and sized for a phone.
+  - **GNSS/Magnetometer**: coordinates and magnetometer readings as text,
     and a plot that switches between two views with a radio pair:
     - **Compass**: a card that turns so north sits at magnetic north, with an
       index mark for the module's +X axis and the heading read out. The default.
