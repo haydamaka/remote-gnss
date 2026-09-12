@@ -104,20 +104,87 @@ It also says where the speed gate belongs: **3 m/s (11 km/h)** is where GNSS
 course becomes better than the compass it is correcting. Below it there is
 nothing to gain, and at walking pace the assumption of §1 is not true anyway.
 
-### 3.3 Duration: count independent samples, not samples
+### 3.3 One sample per straight run, not per fix
 
-GNSS course errors are correlated over seconds — the same multipath, the same
-receiver filtering. Ten fixes a second on a straight road are not ten
-independent measurements. Count a run of qualifying motion as
+Do not feed individual fixes into the estimator. Take a **window** of `T`
+seconds, test that the vehicle went straight through all of it, and emit **one**
+sample: the circular mean of `δ` over the window.
 
-```
-N_eff = duration / τ,   τ ≈ 5 s
-```
+This does two jobs at once. GNSS course errors are correlated over several
+seconds — the same multipath, the same receiver filtering — so ten fixes a
+second on a straight road are nowhere near ten independent measurements, and
+feeding them in one by one inflates the confidence to nonsense. And measured
+straightness is the only direct evidence that the module was pointing where the
+vehicle was going.
 
-and scale the accumulated weight of that run to `N_eff`, so a 30-second
-straight stretch contributes about 6 samples' worth, not 300. Without this, the
-reported confidence is nonsense and thirty seconds of driving looks like a
-finished calibration.
+**How straight is straight.** Testing `max − min` of the course does not work:
+at 3 m/s the course noise alone is about 1°, so 80 fixes scatter over ±3° with
+the vehicle on rails. Fit a line through the unwrapped course against time
+instead, and test the two parts separately:
+
+| test | bound | what it rejects |
+|---|---|---|
+| slope of the course | ≤ 1°/s | turning |
+| total change across the window | ≤ 5° | a slow constant-radius curve |
+| scatter about that line (circular SD) | ≤ 2.5° | a lane change, a skid, a roundabout, bad reception |
+| the same three on the *measured heading* | same bounds | the module moving independently of the vehicle |
+| the two slopes agree | within 0.5°/s | a module loose in a cup holder: it yaws when the vehicle does not |
+
+The last row is the cheap test that catches the case that is otherwise hard to
+see. A device sliding about produces headings that drift while the course does
+not.
+
+There is a pleasant accident here worth relying on: at a **constant** yaw rate,
+the mean course over the window equals the course at the window's midpoint, and
+the same holds for the heading — so a gentle steady curve cancels out of `δ`
+entirely. What does not cancel is a *timing* difference between the two averages,
+and a *changing* rate. That is why the scatter bound is the tight one and the
+slope bound can be moderate.
+
+**Weight from what was measured, not from a formula.** §3.2's variance estimate
+is a prior; the window has the real thing. Use the residual scatter of `δ` about
+its own mean, divided by the number of effective samples in the window, and take
+`w = 1/σ²` from that. A window through a hedge-lined lane weighs itself down
+without anyone having to model hedges.
+
+### 3.3.1 How long should the window be?
+
+**8 seconds**, with non-overlapping windows.
+
+The instinct is that longer is better — more averaging, stronger evidence of
+straightness. It is wrong here, for a reason that has nothing to do with
+statistics:
+
+> **Long windows are only accepted on long straight roads, and long straight
+> roads all point the same way.**
+
+Motorways and trunk roads run in a handful of directions. If the estimator only
+ever accepts 30-second windows, every sample it gets comes from two or three
+compass sectors, §3.4 never fills, and what does get through is the heading
+error of those particular directions applied to all of them. A window length
+that accepts a turn onto a side street, a run down it, and the run after the
+next junction is worth far more than one that accepts only the bypass.
+
+The statistical argument agrees, weakly. With a correlation time of ~5 s, a
+window holds about `T/5` independent course samples, so the accuracy of one
+window improves only as `sqrt(T)` — 16 s is 1.4 times better than 8 s — while
+the *number* of windows a trip yields falls much faster than that, because a
+run has to be entirely straight to count at all.
+
+| T | independent samples | accuracy of one window | where it gets accepted |
+|---|---|---|---|
+| 4 s | ~0.8 | poor; barely evidence of anything | almost anywhere, including between two turns |
+| **8 s** | ~1.6 | ~1.5-2° at 3 m/s, better when faster | most urban straight runs between junctions |
+| 16 s | ~3 | ~1-1.4° | main roads |
+| 30 s | ~6 | ~0.8-1° | motorways, and little else |
+
+Since the whole trip is accumulated anyway (§3.1) the per-window accuracy hardly
+matters: 40 windows at 2° beat 8 windows at 1°, and they arrive from more
+directions. What matters is that every accepted window is **unbiased**, and bias
+comes from turning, not from noise — which is what the table above is for.
+
+Keep it a `menuconfig` setting, since the right answer depends on the vehicle: a
+boat or a plane would want 30 s and would get it.
 
 ### 3.4 Diversity: the estimate is not allowed to come from one direction
 
@@ -162,24 +229,25 @@ estimate, §4's gate rejects them. Getting the first one needs something robust:
 take the **circular median** of the first 20 qualifying samples, then switch to
 the weighted mean from §3.1 seeded with it.
 
-## 4. When a sample counts
+## 4. When a window counts
 
-All of these, or the sample is dropped:
+Every one of these must hold for the **whole** window, or it is dropped —
+nothing is averaged across a gate change:
 
 | Gate | Value | Why |
 |---|---|---|
 | Not spoofed | `spoof ≤ NONE` and `!implausible` | a faked course teaches a faked offset |
 | Fix quality | `fix`, `satellites ≥ 5`, `hdop < 2` | course from a poor fix is noise |
-| Speed | `> 3 m/s` | §3.2 |
-| Speed steady | change `< 1 m/s` over the last second | braking and accelerating correlate with pitch |
-| Turn rate | `< 10°/s`, from both course and heading | §3.2's σ_turn, and it catches a skid |
-| Course and heading turn *together* | the two rates agree within 5°/s | the module is following the vehicle, not sliding on the seat |
-| Field magnitude | within 20 % of the WMM horizontal field | a magnet, a motor or a steel bridge is nearby |
-| Agrees with the current estimate | `|δ − offset| < 3σ + 15°`, once converged | reversing, crabbing, a transient |
+| Speed | `> 3 m/s` throughout | §3.2 |
+| Speed steady | within ±20 % across the window | braking and accelerating pitch the vehicle, and the module with it |
+| Straightness | the five tests of §3.3 | the whole point |
+| Field magnitude | within 20 % of the WMM horizontal field, every sample | a magnet, a motor or a steel bridge went past |
+| No gap | no missing fixes or magnetometer samples | a window with a hole in it is two short windows |
+| Agrees with the current estimate | `\|δ − offset\| < 3σ + 15°`, once converged | reversing, crabbing, a transient |
 
-The "turn together" gate is the cheap one that catches the loose-device case,
-which is otherwise hard to detect: a device sliding around in a cup holder
-produces headings that move independently of the vehicle's course.
+A window that fails is discarded whole and the next one starts after it. No
+sliding: overlapping windows would count the same correlated seconds twice, and
+the confidence in §3.1 would be a fiction.
 
 ## 5. What the user sees and controls
 
@@ -235,8 +303,13 @@ moved by more than 0.5°: this runs for hours and flash wears out.
 
 ## 8. Open questions
 
-- The 5 s correlation time in §3.3 is a guess. It could be measured from a
-  recorded trip: the autocorrelation of `δ` against lag, on a straight road.
+- The 5 s correlation time behind §3.3.1 is a guess, and the window length rests
+  on it. It is measurable from one recorded trip: the autocorrelation of the
+  course residual against lag, on a road known to be straight. Worth doing
+  before settling on 8 s.
+- Whether a failed window should be retried from its midpoint rather than its
+  end. A vehicle that turns 2 s into a window wastes the 6 s of straight running
+  that follows.
 - Whether to let the estimate apply at all while the magnetometer calibration is
   *poor* (§2.1 of CALIBRATION.md), or only at *rough* and better.
 - Whether the sector means should be weighted by sector coverage (a sector
