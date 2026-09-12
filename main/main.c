@@ -47,6 +47,18 @@ void app_main(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(mag_cal_init());
     ESP_ERROR_CHECK_WITHOUT_ABORT(bearing_start());
 
+    // The web server comes before the optional services, because it is how the
+    // device is controlled and updated. Started last, it was the one that
+    // failed when Bluetooth had taken the last of the heap - leaving a device
+    // that could only be recovered with a USB cable. Whatever runs short now,
+    // the page still answers and can turn things off.
+    //
+    // Not fatal either: an abort here costs a USB cable, since the device is
+    // updated over WiFi and a firmware that panics in app_main cannot be
+    // replaced by the very server that would have replaced it.
+    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_service_start());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(webserver_start());
+
     // Wireless GNSS out to a PC or a phone. Neither is fatal: the web page and
     // the receiver work without them.
 #if CONFIG_RGNSS_TCP_ENABLED
@@ -55,10 +67,4 @@ void app_main(void)
 #if CONFIG_RGNSS_BLE_ENABLED
     ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_ble_start());
 #endif
-
-    // Not fatal either. An abort here costs a USB cable: the device is updated
-    // over WiFi, and a firmware that panics in app_main can't be replaced by
-    // the very server that would have replaced it.
-    ESP_ERROR_CHECK_WITHOUT_ABORT(mdns_service_start());
-    ESP_ERROR_CHECK_WITHOUT_ABORT(webserver_start());
 }

@@ -322,7 +322,7 @@ esp_err_t bearing_start(void)
     }
     load();
     // wmm_field alone takes 2 kB in one frame, so this is not generous.
-    if (xTaskCreate(bearing_task, "bearing", 6144, NULL, 4, &task) != pdPASS) {
+    if (xTaskCreate(bearing_task, "bearing", 4608, NULL, 4, &task) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(TAG, "watching for straight runs above 3 m/s");
