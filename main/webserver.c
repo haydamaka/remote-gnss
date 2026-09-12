@@ -361,6 +361,8 @@ static esp_err_t cal_get(httpd_req_t *req)
     json_str(&j, "reason", s.reason[0] ? s.reason : NULL);
     json_str(&j, "blocking", s.blocking[0] ? s.blocking : NULL);
     json_bool(&j, "can_accept", s.can_accept);
+    json_str(&j, "message", s.message[0] ? s.message : NULL);
+    json_int(&j, "refused", s.refused);
     json_num(&j, "progress", s.progress, 3);
     json_num(&j, "coverage", s.coverage, 3);
     json_key(&j, "missing");

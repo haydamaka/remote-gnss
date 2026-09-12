@@ -54,6 +54,8 @@ _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer re
 #define STABLE_RADIUS 0.005f
 
 static const char *TAG = "mag_cal";
+#define TIDY_MAX_SHIFT_UT 1.0f  // a tidy-up that moves the centre more than this is refused
+#define NEWCOMER_BIAS 1.5f      // how much worse than the stored worst a new reading must be to be refused
 
 typedef struct {
     float v[3];      // µT
@@ -92,6 +94,7 @@ static mag_cal_params_t params;
 static mag_cal_params_t params_before_save;
 static mag_fit_t fit;
 static bool have_fit;
+static uint32_t session_refused;  // readings turned away for disagreeing with their own direction
 static int stable_count;
 static uint32_t fit_ms;
 static bool points_dirty;
@@ -135,7 +138,39 @@ static int oldest_in(uint8_t cell)
     return best;
 }
 
-// Keeps up to MAG_CAL_PER_CELL readings per cell, replacing the cell's oldest.
+// Which reading in a full cell makes way. Once there is a fit worth trusting,
+// the one that disagrees with it most, so a long session cleans itself instead
+// of stalling; otherwise the oldest. Guarded, because evicting whatever
+// disagrees would let the fit confirm its own mistakes: it needs a plausible
+// fit that most readings already agree with, and a newcomer only loses its
+// place when it is clearly the worst, so a changed environment still gets in.
+static int victim_in(uint8_t cell, const float m[3], bool *refuse_new)
+{
+    *refuse_new = false;
+    int oldest = oldest_in(cell);
+    if (!have_fit || !mag_fit_plausible_for_binning(&fit) || fit.inliers * 10 < fit.points * 7) {
+        return oldest;
+    }
+    int worst = -1;
+    float worst_res = 0;
+    for (int i = 0; i < npoints; i++) {
+        if (points[i].cell != cell) {
+            continue;
+        }
+        float r = fabsf(mag_fit_residual(&fit, points[i].v));
+        if (worst < 0 || r > worst_res) {
+            worst = i;
+            worst_res = r;
+        }
+    }
+    if (worst < 0) {
+        return oldest;
+    }
+    *refuse_new = fabsf(mag_fit_residual(&fit, m)) > worst_res * NEWCOMER_BIAS;
+    return worst;
+}
+
+// Keeps up to MAG_CAL_PER_CELL readings per cell.
 static void add_reading(const float m[3])
 {
     float u[3];
@@ -147,11 +182,14 @@ static void add_reading(const float m[3])
     for (int i = 0; i < npoints; i++) {
         count += points[i].cell == p.cell;
     }
-    int oldest = oldest_in(p.cell);
-    if ((count < MAG_CAL_PER_CELL || oldest < 0) && npoints < MAG_CAL_MAX_POINTS) {
+    bool refuse_new;
+    int victim = victim_in(p.cell, m, &refuse_new);
+    if ((count < MAG_CAL_PER_CELL || victim < 0) && npoints < MAG_CAL_MAX_POINTS) {
         points[npoints++] = p;
-    } else if (oldest >= 0) {
-        points[oldest] = p;
+    } else if (refuse_new) {
+        session_refused++;  // it disagrees with its own direction more than anything stored there
+    } else if (victim >= 0) {
+        points[victim] = p;
     }
 }
 
@@ -468,9 +506,31 @@ static void finish(bool rough)
     params.points = npoints;
     state = MAG_CAL_DONE;
     params_dirty = points_dirty = true;  // written by flush_nvs(), outside the lock
-    ESP_LOGI(TAG, "saved%s: offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.2f %%, level %u, %u readings",
-             rough ? " (rough)" : "", fit.offset[0], fit.offset[1], fit.offset[2], fit.radius, fit.rms * 100,
-             fit.level, npoints);
+    char tidy[40] = "";
+    if (fit_tidied) {
+        snprintf(tidy, sizeof(tidy), " after tidying to %u readings", fit.points);
+    }
+    switch (quality) {
+    case MAG_CAL_GOOD:
+        snprintf(message_buf, sizeof(message_buf), "Calibration saved%s: %.1f %% off the sphere. The compass is ready.",
+                 tidy, fit.rms * 100);
+        break;
+    case MAG_CAL_ROUGH:
+        snprintf(message_buf, sizeof(message_buf),
+                 "Saved%s, but rough: %.1f %% off the sphere against %.1f %% for good. "
+                 "The compass works; headings may be a degree or two out.",
+                 tidy, fit.rms * 100, (double)ACCEPT_RMS * 100);
+        break;
+    default:
+        snprintf(message_buf, sizeof(message_buf),
+                 "Saved%s, but poor: %.1f %% off the sphere. The compass works roughly; "
+                 "calibrate again standing still, clear of metal.",
+                 tidy, fit.rms * 100);
+        break;
+    }
+    ESP_LOGI(TAG, "saved (%s): offset %.1f %.1f %.1f µT, radius %.1f µT, fit %.2f %%, level %u, %u readings",
+             quality_word(quality), fit.offset[0], fit.offset[1], fit.offset[2], fit.radius, fit.rms * 100,
+             fit.level, fit.points);
 }
 
 // A fit costs a good fraction of a second on this chip, so it runs on a copy
@@ -497,14 +557,41 @@ static void run_fit(void)
     xSemaphoreGive(lock);
 
     int64_t began = esp_timer_get_time();
-    bool ok = mag_fit(snapshot, n, 0.0f, have_start ? &start : NULL, &result, NULL);
+    bool ok = mag_fit(snapshot, n, 0.0f, have_start ? &start : NULL, &result, keep);
+    bool tidied = ok && tidy_up(snapshot, n, keep, &result);
     uint32_t took = (uint32_t)((esp_timer_get_time() - began) / 1000);
 
     xSemaphoreTake(lock, portMAX_DELAY);
     if (id != session_id) {
+// A mathematical cleanup: refit on just the readings the fit kept, so strays
+// stop pulling on the answer. Taken only when it keeps most of the readings,
+// really improves, and barely moves the centre — otherwise it would just be
+// inventing a nicer-looking number.
+static bool tidy_up(const float (*pts)[3], size_t n, const bool *keep, mag_fit_t *fit_io)
+{
+    static float kept[MAG_CAL_MAX_POINTS][3];
+    size_t k = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (keep[i]) {
+            memcpy(kept[k++], pts[i], sizeof(kept[0]));
+        }
+    }
+    if (k < MIN_FIT_POINTS || k * 10 < n * 7) {
+        return false;
+    }
+    mag_fit_t tidy;
+    if (!mag_fit(kept, k, 0.0f, fit_io, &tidy, NULL) || tidy.rms > fit_io->rms * 0.9f ||
+        dist(tidy.offset, fit_io->offset) > TIDY_MAX_SHIFT_UT) {
+        return false;
+    }
+    *fit_io = tidy;
+    return true;
+}
+
         xSemaphoreGive(lock);  // the session was restarted while we fitted
         return;
     }
+    static bool keep[MAG_CAL_MAX_POINTS];
     fit_ms = took;
     if (ok) {
         stable_count = have_fit && settled(&result, &fit) ? stable_count + 1 : 0;
@@ -651,6 +738,7 @@ esp_err_t mag_cal_accept(void)
     }
     xSemaphoreGive(lock);
     return err;
+    session_refused = 0;
 }
 
 void mag_cal_get_status(mag_cal_status_t *out)
@@ -679,32 +767,6 @@ size_t mag_cal_get_points(float (*out)[3], size_t max)
     xSemaphoreTake(lock, portMAX_DELAY);
     size_t n = npoints < max ? npoints : max;
     for (size_t i = 0; i < n; i++) {
-        memcpy(out[i], points[i].v, sizeof(out[i]));
-    }
-    xSemaphoreGive(lock);
-    return n;
-}
-
-size_t mag_cal_stack_free(void)
-{
-    return task ? uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t) : 0;
-}
-
-bool mag_cal_apply(const float m[3], float b[3])
-{
-    xSemaphoreTake(lock, portMAX_DELAY);
-    mag_cal_params_t p = params;
-    xSemaphoreGive(lock);
-    if (!p.valid) {
-        memcpy(b, m, 3 * sizeof(float));
-        return false;
-    }
-    float d[3] = {m[0] - p.offset[0], m[1] - p.offset[1], m[2] - p.offset[2]};
-    for (int i = 0; i < 3; i++) {
-        b[i] = p.matrix[3 * i] * d[0] + p.matrix[3 * i + 1] * d[1] + p.matrix[3 * i + 2] * d[2];
-    }
-    return true;
-}
 esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
 {
     ESP_RETURN_ON_FALSE(started, ESP_ERR_INVALID_STATE, TAG, "calibration task not running");
@@ -745,3 +807,30 @@ esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
     return ESP_OK;
 }
 
+        memcpy(out[i], points[i].v, sizeof(out[i]));
+    }
+    xSemaphoreGive(lock);
+    return n;
+}
+
+size_t mag_cal_stack_free(void)
+{
+    return task ? uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t) : 0;
+}
+
+bool mag_cal_apply(const float m[3], float b[3])
+{
+    xSemaphoreTake(lock, portMAX_DELAY);
+    mag_cal_params_t p = params;
+    xSemaphoreGive(lock);
+    if (!p.valid) {
+        memcpy(b, m, 3 * sizeof(float));
+        return false;
+    }
+    float d[3] = {m[0] - p.offset[0], m[1] - p.offset[1], m[2] - p.offset[2]};
+    for (int i = 0; i < 3; i++) {
+        b[i] = p.matrix[3 * i] * d[0] + p.matrix[3 * i + 1] * d[1] + p.matrix[3 * i + 2] * d[2];
+        .refused = session_refused,
+    }
+    return true;
+}

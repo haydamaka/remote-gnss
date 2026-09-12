@@ -611,6 +611,12 @@ function renderCal() {
     [text, cls] = [view.calError, 'bad'];
   }
   status($('cal-status'), text, cls);
+  if (running && c.refused) {
+    hint += ` ${c.refused} readings turned away for disagreeing with their own direction.`;
+  }
+  if (!running && c.message) {
+    hint = c.message;
+  }
   $('cal-hint').textContent = hint;
   if (running) animate(); else if (!view.animating) draw();
 }

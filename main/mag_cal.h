@@ -56,6 +56,7 @@ typedef struct {
 
 // Loads the saved calibration and starts the calibration task. Call after
 // magnetometer_start().
+    uint32_t refused;           // readings this session turned away as disagreeing
 esp_err_t mag_cal_init(void);
 
 // Starts a session that continues from the saved readings, or with fresh set,
