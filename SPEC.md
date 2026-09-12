@@ -81,6 +81,7 @@ home network.
 | `POST /api/cal/start[?fresh=1]` | start a session; it continues from the saved readings unless `fresh=1` |
 | `POST /api/cal/stop` | interrupt a session, keeping what is worth keeping |
 | `POST /api/cal/accept` | save the current fit although it is below the quality bar |
+| `POST /api/heading` | `offset` in degrees, form-encoded: the correction added to the measured heading |
 | `POST /api/cal/points` | replace the buffered readings with a CSV (`x,y,z` or `seq,t_ms,x,y,z`) |
 | `POST /api/wifi` | `ssid` and `password`, form-encoded: save and restart |
 | `POST /api/wifi/forget` | drop the network set from the page and restart |
@@ -121,6 +122,16 @@ trusted. Two independent sources, because either alone can be fooled:
   - the receiver's year against the firmware's build year, for when there is no
     network;
   - a jump in position faster than 900 km/h.
+
+## Compass bearing
+
+- Below the compass: a **bearing** box and a **Set bearing** button. Point the
+  module along a direction whose bearing is known, type that bearing in, and
+  the device works out the offset between it and the measured heading.
+- The offset is kept in NVS and added to every heading shown, on the card and
+  in the readout. The current correction is shown under the button.
+- Both controls are disabled in sphere view, where a heading means nothing.
+- The row shows the resulting offset, signed, next to the button.
 
 ## Magnetometer calibration
 

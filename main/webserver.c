@@ -263,6 +263,7 @@ static esp_err_t status_get(httpd_req_t *req)
     json_num(&j, "x", m.updated_us ? field[0] : NAN, 2);
     json_num(&j, "y", m.updated_us ? field[1] : NAN, 2);
     json_num(&j, "z", m.updated_us ? field[2] : NAN, 2);
+    json_num(&j, "heading_offset", magnetometer_heading_offset(), 1);
     json_close(&j);
 
     json_open(&j, "wifi");
@@ -497,6 +498,27 @@ static esp_err_t cal_accept_post(httpd_req_t *req)
     return reply(req, HTTPD_200, NULL);
 }
 
+// Turns the compass card so it reads north where the user says north is.
+static esp_err_t heading_post(httpd_req_t *req)
+{
+    char body[64], value[16];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return reply(req, HTTPD_400, "The request was too long");
+    }
+    if (httpd_query_key_value(body, "offset", value, sizeof(value)) != ESP_OK) {
+        return reply(req, HTTPD_400, "No offset given");
+    }
+    char *end;
+    float degrees = strtof(value, &end);
+    if (end == value || !isfinite(degrees)) {
+        return reply(req, HTTPD_400, "The offset isn't a number");
+    }
+    if (magnetometer_set_heading_offset(degrees) != ESP_OK) {
+        return reply(req, HTTPD_500, "Couldn't save the offset");
+    }
+    return reply(req, HTTPD_200, NULL);
+}
+
 static esp_err_t cal_stop_post(httpd_req_t *req)
 {
     mag_cal_stop();
@@ -614,11 +636,21 @@ esp_err_t webserver_start(void)
         {.uri = "/api/cal/stop", .method = HTTP_POST, .handler = cal_stop_post},
         {.uri = "/api/cal/accept", .method = HTTP_POST, .handler = cal_accept_post},
         {.uri = "/api/cal/points", .method = HTTP_POST, .handler = cal_points_post},
+        {.uri = "/api/heading", .method = HTTP_POST, .handler = heading_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
         {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
         {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = forget_post},
     };
+
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.server_port = CONFIG_RGNSS_HTTP_PORT;
+    cfg.stack_size = 6144;
+    cfg.lru_purge_enable = true;
+    // Sized from the table above, so adding an endpoint can't run it out of slots.
+    cfg.max_uri_handlers = sizeof(uris) / sizeof(uris[0]);
+    ESP_RETURN_ON_ERROR(httpd_start(&server, &cfg), TAG, "start");
+
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         ESP_RETURN_ON_ERROR(httpd_register_uri_handler(server, &uris[i]), TAG, "register %s", uris[i].uri);
     }

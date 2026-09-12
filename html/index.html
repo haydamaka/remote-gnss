@@ -76,6 +76,15 @@
   /* ...except the file pair, which shares a row in equal halves. */
   .cal-info .buttons.pair { flex-direction: row; margin-top: 0; }
   .cal-info .buttons.pair button { flex: 1; padding-inline: 8px; }
+  /* Under the compass, one row: turn the card to where north really is. */
+  .north { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  /* One size for the whole row: the label, the box, the button and the readout. */
+  .north label, .north .note { display: flex; align-items: center; gap: 6px; font-size: 15px; color: var(--muted); margin: 0; }
+  .north input { width: 5.5em; text-align: right; padding: 6px 8px; }
+  .north input:disabled { opacity: .5; }
+  .north button { padding: 7px 14px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+  .north button:disabled { opacity: .5; cursor: default; }
+
   .bar { height: 8px; margin: 6px 0; overflow: hidden; background: var(--line); border-radius: 4px; }
   .bar > div { width: 0; height: 100%; background: var(--accent); transition: width .3s; }
   /* Wide screens: Position and Magnetometer side by side, equally tall. */
@@ -149,6 +158,15 @@
             <button class="secondary" type="button" id="cal-load">Load calibration</button>
             <input type="file" id="cal-file" accept=".csv,text/csv" hidden>
           </div>
+        </div>
+        <div class="north" id="north">
+          <label>Bearing
+            <input type="number" id="north-bearing" step="0.1" inputmode="decimal"
+                   aria-label="The bearing the module is pointing along, in degrees">
+            <span>°</span>
+          </label>
+          <button class="secondary" type="button" id="north-set">Set bearing</button>
+          <p class="note" id="north-note"></p>
         </div>
       </div>
     </section>
@@ -252,9 +270,11 @@ function renderMag(m) {
   $('my').textContent = num(m.y, 2, ' µT');
   $('mz').textContent = num(m.z, 2, ' µT');
   $('mb').textContent = ok ? num(Math.hypot(m.x, m.y, m.z), 2, ' µT') : DASH;
-  $('mh').textContent = ok ? num((Math.atan2(m.y, m.x) * 180 / Math.PI + 360) % 360, 1, '°') : DASH;
+  showOffset(m.heading_offset);  // before the heading, which uses the offset
+  $('mh').textContent = ok ? num(((Math.atan2(m.y, m.x) * 180 / Math.PI) + view.offset + 360) % 360, 1, '°') : DASH;
   $('mag-note').textContent = (m.calibrated ? 'Calibrated (offset and shape corrected), sensor axes.' : 'Raw sensor axes, uncalibrated.') +
-    ' The heading is atan2(Y, X), valid only with the module held flat.';
+    ' The heading is atan2(Y, X)' + (view.offset ? ' plus the bearing offset' : '') +
+    ', valid only with the module held flat.';
 }
 
 function renderWifi(w) {
@@ -336,7 +356,7 @@ $('forget').onclick = () => {
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
 const view = {cal: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
-              fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null,
+              fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const LEVELS = ['sphere', 'per-axis', '9-parameter'];  // how many parameters the fit dares to use
@@ -376,6 +396,8 @@ function setMode(mode) {
     input.checked = input.value === mode;
   }
   $('plot').classList.toggle('sphere', mode === 'sphere');
+  // The offset turns the compass card, so a heading means nothing over the point cloud.
+  for (const el of [$('north-set'), $('north-bearing')]) el.disabled = mode !== 'compass';
   animate();  // frame() draws once and stops if there's nothing to animate
 }
 
@@ -670,7 +692,9 @@ async function pollLive() {
         const [, , x, y, z] = j.samples[j.samples.length - 1];
         view.live = [x, y, z].map(v => v * j.ut_per_count);
         const b = calibrated(view.live);
-        view.headingTarget = (Math.atan2(b[1], b[0]) * 180 / Math.PI + 360) % 360;
+        view.headingRaw = (Math.atan2(b[1], b[0]) * 180 / Math.PI + 360) % 360;
+        view.headingAt = Date.now();
+        view.headingTarget = (view.headingRaw + view.offset) % 360;
         if (view.mode === 'compass') animate(); else if (!view.animating) draw();
       }
       view.since = j.seq;
@@ -731,6 +755,68 @@ $('cal-file').onchange = async e => {
     await calPost('/api/cal/points', await file.text());
   }
 };
+
+// The board is mounted however it is mounted, so the user points it at
+// something whose bearing they know and types that in; the difference from the
+// measured heading is the offset, which the firmware keeps.
+function showOffset(deg) {
+  // A status request sent before the offset was set carries the old value, so
+  // ignore what the device says for a moment after setting it.
+  if (deg != null && Date.now() > view.offsetHeld) view.offset = deg;
+  const signed = view.offset > 180 ? view.offset - 360 : view.offset;  // -12° reads better than 348°
+  $('north-note').textContent = Date.now() < view.northMsgUntil ? view.northMsg : `Offset ${signed.toFixed(1)}°`;
+}
+
+// Said in the same place as the offset, so it needs a lifetime of its own:
+// the status poll redraws that line every second.
+function northSays(text) {
+  view.northMsg = text;
+  view.northMsgUntil = Date.now() + 6000;
+  showOffset();
+}
+
+async function setBearing(bearing) {
+  for (const el of [$('north-set'), $('north-bearing')]) el.disabled = true;
+  try {
+    // The heading at the moment of the click, from the device, rather than
+    // whatever the plot last drew: the live poll idles while the tab is hidden.
+    const s = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
+    const m = (await s.json()).mag;
+    if (m.x == null || m.age_ms > 2000) throw new Error('no recent reading from the magnetometer');
+    const raw = (Math.atan2(m.y, m.x) * 180 / Math.PI + 360) % 360;
+    const deg = ((bearing - raw) % 360 + 360) % 360;
+
+    view.offsetHeld = Date.now() + 3000;  // ignore a status reply already in flight
+    const r = await fetch('/api/heading', {method: 'POST', body: `offset=${deg.toFixed(2)}`,
+                                           signal: AbortSignal.timeout(5000)});
+    const j = (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
+    if (!j || !j.ok) throw new Error((j && j.error) || `refused (${r.status})`);
+
+    view.offset = deg;
+    view.offsetHeld = Date.now() + 2000;
+    view.headingRaw = raw;
+    view.headingAt = Date.now();
+    view.headingTarget = (raw + deg) % 360;
+    animate();
+    $('north-bearing').value = '';  // it described where the module pointed then, not now
+    showOffset();
+  } catch (e) {
+    view.offsetHeld = 0;
+    northSays(`Couldn't set the bearing: ${e.message}`);
+  } finally {
+    for (const el of [$('north-set'), $('north-bearing')]) el.disabled = view.mode !== 'compass';
+  }
+}
+
+$('north-set').onclick = () => {
+  const bearing = parseFloat($('north-bearing').value);
+  if (!isFinite(bearing)) {
+    northSays('Type the bearing the module is pointing along');
+    return;
+  }
+  setBearing(bearing);
+};
+$('north-bearing').onkeydown = e => { if (e.key === 'Enter') $('north-set').click(); };
 
 for (const input of document.querySelectorAll('input[name=plotview]')) {
   input.onchange = () => setMode(input.value);

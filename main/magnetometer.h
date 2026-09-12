@@ -32,5 +32,11 @@ void magnetometer_get(magnetometer_data_t *out);
 // oldest first, and returns how many. latest gets the newest seq (0 if none).
 size_t magnetometer_samples_since(uint32_t since, magnetometer_sample_t *out, size_t max, uint32_t *latest);
 
+// Degrees added to the measured heading so the compass reads north where the
+// user wants it. Kept in NVS.
+float magnetometer_heading_offset(void);
+
+esp_err_t magnetometer_set_heading_offset(float degrees);
+
 // Microtesla per raw count for the detected chip; 0 if none was found.
 float magnetometer_ut_per_count(void);

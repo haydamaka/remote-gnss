@@ -1,5 +1,6 @@
 #include "magnetometer.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -9,11 +10,14 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
 
 #define I2C_HZ 100000
 #define I2C_TIMEOUT_MS 50
 #define SAMPLE_MS 100
 #define RESET_MS 20
+#define NVS_NAMESPACE "mag"
+#define NVS_KEY_OFFSET "hdg_off"
 
 typedef struct {
     const char *name;
@@ -127,6 +131,8 @@ static void log_bus_scan(void)
 
 // Leaves dev, chip and chip_addr set on success.
 // ESP_ERR_TIMEOUT means the bus itself is stuck rather than the chip absent.
+static void load_heading_offset(void);
+
 static esp_err_t detect(void)
 {
     for (size_t i = 0; i < sizeof(chips) / sizeof(chips[0]); i++) {
@@ -259,6 +265,7 @@ esp_err_t magnetometer_start(void)
         err = ESP_ERR_NO_MEM;
         goto fail;
     }
+    load_heading_offset();
     ESP_LOGI(TAG, "%s at 0x%02x, sampling every %d ms", chip->name, chip_addr, SAMPLE_MS);
     return ESP_OK;
 
@@ -290,6 +297,51 @@ size_t magnetometer_samples_since(uint32_t since, magnetometer_sample_t *out, si
     *latest = next_seq - 1;
     taskEXIT_CRITICAL(&lock);
     return n;
+}
+
+// Where the user wants the compass to read north: added to the measured
+// heading. Set from the page, since only the user knows how the board is
+// mounted, and kept in NVS so it survives a restart.
+static float heading_offset;
+
+static void load_heading_offset(void)
+{
+    nvs_handle_t nvs;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) {
+        return;
+    }
+    size_t len = sizeof(heading_offset);
+    if (nvs_get_blob(nvs, NVS_KEY_OFFSET, &heading_offset, &len) != ESP_OK || len != sizeof(heading_offset)) {
+        heading_offset = 0.0f;
+    }
+    nvs_close(nvs);
+    if (heading_offset != 0.0f) {
+        ESP_LOGI(TAG, "heading offset %.1f degrees", heading_offset);
+    }
+}
+
+float magnetometer_heading_offset(void)
+{
+    return heading_offset;
+}
+
+esp_err_t magnetometer_set_heading_offset(float degrees)
+{
+    degrees = fmodf(degrees, 360.0f);
+    if (degrees < 0.0f) {
+        degrees += 360.0f;
+    }
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "open NVS");
+    esp_err_t err = nvs_set_blob(nvs, NVS_KEY_OFFSET, &degrees, sizeof(degrees));
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    ESP_RETURN_ON_ERROR(err, TAG, "save heading offset");
+    heading_offset = degrees;
+    ESP_LOGI(TAG, "heading offset set to %.1f degrees", degrees);
+    return ESP_OK;
 }
 
 float magnetometer_ut_per_count(void)
