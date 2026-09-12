@@ -56,6 +56,7 @@ typedef struct {
     uint8_t missing;            // bit k: cap k of +X −X +Y −Y +Z −Z not reached
     float centre[3];            // current centre estimate
     uint16_t points;            // readings in the buffer
+    uint32_t points_seq;        // changes whenever those readings do
     uint32_t refused;           // readings this session turned away as disagreeing
     mag_cal_params_t params;    // the calibration in use
     bool can_accept;            // the fit is usable now, though below the quality bar
@@ -88,6 +89,10 @@ void mag_cal_get_status(mag_cal_status_t *out);
 
 // Copies up to max buffered readings (µT): the session's, or the saved ones.
 size_t mag_cal_get_points(float (*out)[3], size_t max);
+
+// One reading at a time, so a caller can stream them without a second copy of
+// the buffer. False once i is past the end.
+bool mag_cal_get_point(size_t i, float out[3]);
 
 // Bytes of stack the calibration task has never used: the fit is the heaviest
 // thing it does, so this is what to watch when the fit grows.

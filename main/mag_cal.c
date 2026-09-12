@@ -102,10 +102,19 @@ static bool have_fit;
 static int stable_count;
 static uint32_t fit_ms;
 static bool points_dirty;
+static uint32_t points_seq;  // bumped whenever the buffer changes, so the page can tell
 static bool params_dirty;
 static bool started;
 static bool fit_once;  // fit even without a session: readings were just loaded
 static TaskHandle_t task;
+
+// The readings changed: they need saving, and anyone drawing them needs to
+// know. Every site that alters the buffer goes through here.
+static void points_changed(void)
+{
+    points_dirty = true;
+    points_seq++;
+}
 
 static float dist(const float a[3], const float b[3])
 {
@@ -411,7 +420,7 @@ static void fail(const char *text)
     snprintf(message_buf, sizeof(message_buf), "Nothing usable to save: %s. %s", text,
              params.valid ? "The previous calibration stays in use." : "The compass is using raw readings.");
     state = MAG_CAL_FAILED;
-    points_dirty = true;  // keep the progress for the next session
+    points_changed();  // keep the progress for the next session
     ESP_LOGW(TAG, "calibration failed: %s", reason_buf);
 }
 
@@ -531,7 +540,8 @@ static void finish(mag_cal_quality_t quality)
     params.fit_rms = fit.rms;
     params.points = npoints;
     state = MAG_CAL_DONE;
-    params_dirty = points_dirty = true;  // written by flush_nvs(), outside the lock
+    params_dirty = true;  // written by flush_nvs(), outside the lock
+    points_changed();
     char tidy[40] = "";
     if (fit_tidied) {
         snprintf(tidy, sizeof(tidy), " after tidying to %u readings", fit.points);
@@ -692,7 +702,7 @@ static void cal_task(void *arg)
             fresh = 0;
         }
         if (save_due) {
-            points_dirty = true;
+            points_changed();
         }
         xSemaphoreGive(lock);
 
@@ -761,7 +771,7 @@ void mag_cal_stop(void)
             snprintf(message_buf, sizeof(message_buf), "Stopped at %.0f %%. Too little to save; %s", progress * 100,
                      params.valid ? "the previous calibration stays in use." : "the compass uses raw readings.");
         }
-        points_dirty = true;  // the task writes it, off this thread
+        points_changed();  // the task writes it, off this thread
         ESP_LOGI(TAG, "calibration stopped at %.0f %%", progress * 100);
     }
     xSemaphoreGive(lock);
@@ -798,7 +808,7 @@ esp_err_t mag_cal_set_points(const float (*pts)[3], size_t n)
     rebin();
     fit_once = true;  // let the task fit them and re-bin about the result
     update_progress();
-    points_dirty = true;
+    points_changed();
     snprintf(message_buf, sizeof(message_buf),
              "Loaded %u readings from a file, %.0f %% of directions covered. Continue calibration to fit them.",
              npoints, coverage * 100);
@@ -830,6 +840,7 @@ void mag_cal_get_status(mag_cal_status_t *out)
         .missing = missing,
         .centre = {centre[0], centre[1], centre[2]},
         .points = npoints,
+        .points_seq = points_seq,
         .refused = session_refused,
         .params = params,
         .have_fit = have_fit,
@@ -851,6 +862,18 @@ size_t mag_cal_get_points(float (*out)[3], size_t max)
     }
     xSemaphoreGive(lock);
     return n;
+}
+
+bool mag_cal_get_point(size_t i, float out[3])
+{
+    bool ok = false;
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (i < npoints) {
+        memcpy(out, points[i].v, sizeof(float) * 3);
+        ok = true;
+    }
+    xSemaphoreGive(lock);
+    return ok;
 }
 
 size_t mag_cal_stack_free(void)

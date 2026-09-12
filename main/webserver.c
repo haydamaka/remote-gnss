@@ -368,13 +368,13 @@ static esp_err_t cal_get(httpd_req_t *req)
 {
     static const char *const STATES[] = {"idle", "running", "done", "stopped", "failed"};
     static const char *const CAPS[] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
-    // One httpd task serves every request, so these can be static.
-    static float points[MAG_CAL_MAX_POINTS][3];
-    static char buf[12288];
+    // The readings are not in here: they are several kilobytes, they change
+    // only while calibrating, and the compass view never draws them. The page
+    // fetches them from GET /api/cal/points when points_seq says they moved.
+    static char buf[1536];
 
     mag_cal_status_t s;
     mag_cal_get_status(&s);
-    size_t n = mag_cal_get_points(points, MAG_CAL_MAX_POINTS);
 
     json_t j = {.buf = buf, .size = sizeof(buf)};
     json_open(&j, NULL);
@@ -422,14 +422,27 @@ static esp_err_t cal_get(httpd_req_t *req)
     } else {
         json_str(&j, "fit", NULL);
     }
-    json_key(&j, "points");
-    json_append(&j, "[");
-    for (size_t i = 0; i < n; i++) {
-        json_append(&j, "%s[%.1f,%.1f,%.1f]", i ? "," : "", points[i][0], points[i][1], points[i][2]);
-    }
-    json_append(&j, "]");
+    json_int(&j, "points", s.points);
+    json_int(&j, "points_seq", s.points_seq);
     json_close(&j);
     return send_json(req, &j, "calibration");
+}
+
+// The readings themselves, streamed a line at a time so no copy of the buffer
+// is needed anywhere. Same shape the page drew before: [[x,y,z],...].
+static esp_err_t cal_points_get(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_send_chunk(req, "[", 1);
+    float p[3];
+    for (size_t i = 0; mag_cal_get_point(i, p); i++) {
+        char one[48];
+        int len = snprintf(one, sizeof(one), "%s[%.1f,%.1f,%.1f]", i ? "," : "", p[0], p[1], p[2]);
+        httpd_resp_send_chunk(req, one, len);
+    }
+    httpd_resp_send_chunk(req, "]", 1);
+    return httpd_resp_send_chunk(req, NULL, 0);
 }
 
 // ?fresh=1 discards the saved readings; otherwise the session continues from them.
@@ -799,6 +812,7 @@ esp_err_t webserver_start(void)
         {.uri = "/api/status", .method = HTTP_GET, .handler = status_get},
         {.uri = "/api/mag/samples", .method = HTTP_GET, .handler = mag_samples_get},
         {.uri = "/api/cal", .method = HTTP_GET, .handler = cal_get},
+        {.uri = "/api/cal/points", .method = HTTP_GET, .handler = cal_points_get},
         {.uri = "/api/cal/start", .method = HTTP_POST, .handler = cal_start_post},
         {.uri = "/api/cal/stop", .method = HTTP_POST, .handler = cal_stop_post},
         {.uri = "/api/cal/accept", .method = HTTP_POST, .handler = cal_accept_post},

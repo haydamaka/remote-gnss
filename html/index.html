@@ -472,7 +472,7 @@ document.getElementById('ble-off').addEventListener('click', async () => {
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
-const view = {cal: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
+const view = {cal: null, points: [], pointsSeq: -1, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
               fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
@@ -577,6 +577,9 @@ for (const input of document.querySelectorAll('input[name=plotview]')) {
   $('plot').classList.toggle('sphere', mode === 'sphere');
   // The offset turns the compass card, so a heading means nothing over the point cloud.
   for (const el of [$('north-set'), $('north-bearing')]) el.disabled = mode !== 'compass';
+  if (mode === 'sphere' && view.cal && view.cal.points_seq !== view.pointsSeq) {
+    fetchPoints().then(draw).catch(() => {});
+  }
   animate();  // frame() draws once and stops if there's nothing to animate
 }
 
@@ -728,7 +731,7 @@ function drawSphere(g, size, c) {
     g.fillText(label, e[0] + 3, e[1] - 3);
   }
   // Dots are fainter outside calibration, so the arrow stands out; far side dimmer still.
-  for (const p of c.points) {
+  for (const p of view.points) {
     const d = rel(p), s = project(d);
     g.globalAlpha = (s[2] > 0 ? 0.35 : 1) * (running ? 0.9 : 0.5);
     g.fillStyle = colourOf(d);
@@ -773,7 +776,7 @@ function animate() {
 }
 
 function renderCal() {
-  const c = view.cal, running = c.state === 'running', saved = c.points.length > 0;
+  const c = view.cal, running = c.state === 'running', saved = c.points > 0;
   const pct = Math.round(c.progress * 100);
   if (running) view.calError = '';  // the last request clearly went through
   // Show the sphere while calibrating; going back is the user's choice.
@@ -795,7 +798,7 @@ function renderCal() {
     // The bar is coverage; finishing also needs the fit itself to pass, so say what's left.
     text = c.blocking ? `Calibrating · waiting on ${c.blocking}` : `Calibrating · ${pct} %`;
     cls = '';
-    hint = `${c.points.length} readings kept, ${Math.round(c.coverage * 100)} % of directions covered (target 90 %). ` +
+    hint = `${c.points} readings kept, ${Math.round(c.coverage * 100)} % of directions covered (target 90 %). ` +
       'Rotate the module slowly through every orientation' +
       (missing.length ? `; not reached yet: ${missing.join(', ')}.` : '.');
     if (c.fit) {
@@ -839,9 +842,18 @@ function renderCal() {
 // The 0.98 quantile of the readings' distance from the centre, for the plot scale.
 function calRadius(c) {
   const centre = c.state === 'running' || !c.cal ? c.centre : c.cal.offset;
-  const radii = c.points.map(p => Math.hypot(p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]))
+  const radii = view.points.map(p => Math.hypot(p[0] - centre[0], p[1] - centre[1], p[2] - centre[2]))
     .sort((a, b) => a - b);
   return radii.length ? quantile(radii, 0.98) : c.cal ? c.cal.radius : 0;
+}
+
+// Several kilobytes that change only while calibrating, and that the compass
+// view never draws: worth asking for only when they will be used.
+async function fetchPoints() {
+  const r = await fetch('/api/cal/points', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
+  view.points = await r.json();
+  view.pointsSeq = view.cal.points_seq;
+  view.radius = calRadius(view.cal);
 }
 
 async function pollCal() {
@@ -850,7 +862,14 @@ async function pollCal() {
   try {
     const r = await fetch('/api/cal', {cache: 'no-store', signal: AbortSignal.timeout(4000)});
     view.cal = await r.json();
-    view.radius = calRadius(view.cal);
+    // While a session runs the readings change constantly, so don't rely on the
+    // counter; when idle they never change, so rely on it entirely.
+    const wanted = view.mode === 'sphere' && !$('cal').hidden;
+    if (wanted && (view.cal.state === 'running' || view.cal.points_seq !== view.pointsSeq)) {
+      await fetchPoints();
+    } else if (!view.points.length) {
+      view.radius = calRadius(view.cal);
+    }
     renderCal();
     ok = true;
   } catch {
@@ -907,9 +926,17 @@ $('cal-accept').onclick = () => calPost('/api/cal/accept');
 
 // The readings themselves, not the fitted parameters: they are what a later
 // session continues from, and what the offline tools in tools/ read.
-$('cal-save').onclick = () => {
-  const pts = view.cal && view.cal.points;
-  if (!pts || !pts.length) {
+$('cal-save').onclick = async () => {
+  let pts = view.points;
+  if (view.cal && view.cal.points_seq !== view.pointsSeq) {
+    try {
+      await fetchPoints();
+      pts = view.points;
+    } catch {
+      pts = [];
+    }
+  }
+  if (!pts.length) {
     view.calError = 'No readings to save yet';
     renderCal();
     return;
