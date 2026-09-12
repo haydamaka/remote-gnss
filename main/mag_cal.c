@@ -24,7 +24,7 @@ _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer re
 #define FIT_EVERY_US (3 * 1000000LL)  // and no sooner: a fit costs a good fraction of a second
 #define MIN_FIT_POINTS 20
 #define RECENTRE_UT 2.0f              // centre shift that triggers re-binning
-#define COVERAGE_DONE 0.9f            // share of cells counted as covered
+#define COVERAGE_DONE (CONFIG_RGNSS_CAL_COVERAGE_PCT / 100.0f)
 #define CELL_MIN 2                    // readings for a cell to count as covered
 #define CAP_MIN 5                     // readings within 45° of each of ±X, ±Y, ±Z
 #define CAP_COS 0.70710678f
@@ -37,11 +37,11 @@ _Static_assert(MAG_CAL_MAX_POINTS <= MAG_FIT_MAX_POINTS, "the fit takes fewer re
 // estimate yet, 1.5 % is out of reach on real data.
 #define RADIUS_MIN 20.0f
 #define RADIUS_MAX 70.0f
-#define ACCEPT_RMS 0.025f
+#define ACCEPT_RMS (CONFIG_RGNSS_CAL_GOOD_PERMILLE / 1000.0f)
 // A rough calibration: the readings it kept sit on the ellipsoid, and it kept
 // enough of them. Trimming barely moves the parameters (CALIBRATION.md §9), so
 // this is still a usable calibration — it is only labelled as rough.
-#define ROUGH_RMS 0.06f
+#define ROUGH_RMS (CONFIG_RGNSS_CAL_ROUGH_PERMILLE / 1000.0f)
 #define ROUGH_INLIERS 0.7f
 #define ACCEPT_WOBBLE 0.02f
 #define ACCEPT_SCATTER 0.2f
