@@ -67,6 +67,33 @@ menu "Remote GNSS"
 
     menu "GNSS"
 
+        choice RGNSS_GNSS_RECEIVER
+            prompt "Receiver"
+            default RGNSS_GNSS_WS181
+            help
+                Which receiver this firmware is built for. It decides the rate
+                the UART starts at and what, if anything, is sent to set the
+                receiver up: see main/gnss_ws181.c and main/gnss_f9p.c. The
+                rest of the GNSS code is the same either way.
+
+            config RGNSS_GNSS_WS181
+                bool "Walksnail WS-M181 (u-blox M10, compass on board)"
+
+            config RGNSS_GNSS_F9P
+                bool "u-blox ZED-F9P (RTK, no compass)"
+
+        endchoice
+
+        config RGNSS_GNSS_RATE_HZ
+            int "Navigation rate (Hz)"
+            range 1 20
+            default 5
+            depends on RGNSS_GNSS_F9P
+            help
+                Solutions per second. The F9P reaches 20 Hz on GPS alone but
+                only 7-8 Hz with every constellation and RTK, so leave room.
+                The WS-M181 is left at whatever Walksnail set, which is 10 Hz.
+
         comment "Leave GPIO 2, 8, 9, 20 and 21 alone: strapping pin, LED, BOOT and the console"
 
         config RGNSS_GNSS_RX_GPIO
@@ -82,6 +109,13 @@ menu "Remote GNSS"
         config RGNSS_GNSS_BAUD
             int "Baud rate"
             default 115200
+            help
+                The rate the link should end up running at. gnss.c hunts across
+                the usual rates whatever this says, so it is a preference rather
+                than a requirement - but a receiver that can be told (the F9P)
+                is told to move here, because the 38400 baud it arrives at
+                carries about 3.8 kB/s and a multi-constellation stream above
+                3 Hz is more than that.
 
     endmenu
 

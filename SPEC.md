@@ -10,7 +10,13 @@ module. It serves the position and magnetometer readings on a web page over WiFi
 
 ## Hardware
 
-Walksnail WS-M181 (from vendor listings):
+Two receivers are supported, chosen at build time in menuconfig under
+"Remote GNSS → GNSS → Receiver". Only one is compiled in; everything above
+`gnss.c` is the same either way.
+
+### Walksnail WS-M181 — the default
+
+From vendor listings:
 - GNSS: u-blox M10 (UBX-M10050), GPS + GLONASS + BDS by default. Outputs NMEA
   and UBX at 115200 baud, 10 Hz by default.
 - Compass: QMC5883 on I2C. Both chip variants are handled: QMC5883P (0x2C) and
@@ -47,6 +53,25 @@ its own drives the LED, every 50 ms.
 
 Pins to leave alone: 2 (strapping pin, must read high at reset), 8 (onboard
 LED), 9 (BOOT button), 20/21 (UART0, serial console).
+
+### u-blox ZED-F9P — the RTK alternative
+
+A bare ZED-F9P-02B on a breakout board with an SMA antenna connector, with no
+compass of its own: with it selected, the magnetometer either comes from a
+separate board on the same I2C pins or the compass tab has nothing to show.
+
+It arrives at 38400 baud, 1 Hz, and NMEA rounded to five decimals of a minute —
+about 2 cm, which throws away most of what RTK is for. So unlike the WS-M181 it
+is configured on every lock (`gnss_f9p.c`): the link rate, the navigation rate
+(menuconfig, default 5 Hz), high-precision NMEA, and the sentence set with GSV
+slowed to once a second. All of it goes to the receiver's RAM layer, never its
+flash, so pulling its power restores whatever its owner had.
+
+Without RTCM3 corrections on its RX line it is a 1 m receiver with a good
+antenna; an NTRIP client to supply them is not written yet.
+
+Wiring is the same four lines as the WS-M181 — 5V, GND, the receiver's TX to
+GPIO 4 and its RX to GPIO 3 — minus the I2C pair.
 
 ## WiFi
 
@@ -388,6 +413,9 @@ trusted. Two independent sources, because either alone can be fooled:
 | `mdns_service.c` | mDNS hostname and service advertisement                 |
 | `webserver.c`    | HTTP server, embedded page, JSON API                    |
 | `gnss.c`         | Reads the receiver on UART1; NMEA parsing with minmea   |
+| `gnss_receiver.h`| What differs between receivers: rate, configuration, UBX |
+| `gnss_ws181.c`   | WS-M181 profile: 115200 baud, nothing sent to it         |
+| `gnss_f9p.c`     | ZED-F9P profile: rate, high-precision NMEA, sentence set |
 | `magnetometer.c` | Reads the QMC5883P/L or IST8310 on I2C                  |
 | `mag_cal.c`      | Calibration sessions, direction cells, criteria, NVS storage |
 | `mag_fit.c`      | The fit itself: robust 9-parameter ellipsoid, no RTOS or storage |

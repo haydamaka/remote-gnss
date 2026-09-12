@@ -248,6 +248,7 @@ static esp_err_t status_get(httpd_req_t *req)
     json_open(&j, NULL);
 
     json_open(&j, "gnss");
+    json_str(&j, "receiver", g.receiver);
     json_int(&j, "sentences", g.sentences);
     json_int(&j, "baud", g.baud);
     json_num(&j, "age_ms", age_ms(g.updated_us), 0);
@@ -258,6 +259,7 @@ static esp_err_t status_get(httpd_req_t *req)
     json_num(&j, "lon", g.longitude, 7);
     json_num(&j, "alt", g.altitude_m, 1);
     json_num(&j, "hdop", g.hdop, 2);
+    json_num(&j, "acc", g.accuracy_m, 3);
     // As they go out to TCP and BLE (smoothed, 0 at rest, when that is on);
     // the receiver's own under raw_.
     json_num(&j, "speed_kmh", g.speed_out_kmh, 1);

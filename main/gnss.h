@@ -15,6 +15,7 @@ typedef enum {
 
 // Latest state from the GNSS receiver. Unknown numbers are NaN.
 typedef struct {
+    const char *receiver; // the model this firmware was built for
     uint32_t sentences;   // valid NMEA sentences received since boot
     int baud;             // the rate it was actually found at
     int64_t updated_us;   // esp_timer time of the last valid sentence, 0 if none yet
@@ -26,6 +27,8 @@ typedef struct {
     double longitude;     // degrees, east positive
     float altitude_m;     // above mean sea level
     float hdop;
+    float accuracy_m;     // horizontal position error from GST, NaN if the receiver sends none
+    int64_t accuracy_us;  // esp_timer time of the last GST, 0 if none
     float speed_kmh;      // as the receiver gives it
     float course_deg;     // over ground, true north; as the receiver gives it
     float speed_out_kmh;  // what goes out: filtered, and 0 at rest, when gnss_settings_t.filter_speed

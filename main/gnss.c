@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "bearing.h"
+#include "gnss_receiver.h"
 #include "minmea.h"
 #include "nmea_hub.h"
 #include "nvs.h"
@@ -55,11 +56,42 @@
 
 static const char *TAG = "gnss";
 
-// Receivers disagree about the default: the WS-M181's M10 talks at 115200,
-// a ZED-F9P at 38400 out of the box. Rather than make it a setting nobody
-// remembers, try the configured rate first and then the usual suspects until
-// a sentence passes its checksum.
-static const int BAUDS[] = {CONFIG_RGNSS_GNSS_BAUD, 38400, 115200, 9600, 57600, 230400, 460800};
+// Receivers disagree about the default: the WS-M181's M10 talks at 115200, a
+// ZED-F9P at 38400 out of the box. Rather than make it a setting nobody
+// remembers, try rates in turn until a sentence passes its checksum. The
+// compiled-in receiver's own default comes first, because that is where one
+// that has just been powered on will be whatever the link was set to last
+// time; then the rate we mean to settle at, then the usual suspects.
+#define BAUD_COUNT 8
+
+static int baud_at(size_t i)
+{
+    static const int BAUDS[] = {38400, 115200, 9600, 57600, 230400, 460800};
+    if (i == 0) {
+        return gnss_receiver.default_baud;
+    }
+    if (i == 1) {
+        return CONFIG_RGNSS_GNSS_BAUD;
+    }
+    return BAUDS[i - 2];
+}
+
+// The next rate to try after i, skipping any an earlier index already covers:
+// the first two entries are usually in the list as well.
+static size_t next_baud(size_t i)
+{
+    for (size_t n = 1; n <= BAUD_COUNT; n++) {
+        size_t j = (i + n) % BAUD_COUNT;
+        bool dup = false;
+        for (size_t k = 0; k < j; k++) {
+            dup = dup || baud_at(k) == baud_at(j);
+        }
+        if (!dup) {
+            return j;
+        }
+    }
+    return 0;
+}
 
 // Written only by the reader task, which may therefore read it unlocked;
 // everyone else copies it out under the lock.
@@ -72,6 +104,7 @@ static volatile bool withhold_spoofed = true;
 static gnss_settings_t settings = {.filter_speed = true, .motion = GNSS_MOTION_NONE};
 static volatile bool cfg_dirty = true;  // the receiver hasn't been sent the settings since they changed
 static volatile gnss_cfg_state_t cfg_state = GNSS_CFG_UNSENT;
+static bool cfg_awaiting;               // the motion settings went out and nothing has answered them
 static int64_t sacc_us;                 // when speed_acc_kmh was last set
 
 // NMEA ddmm.mmmm to signed decimal degrees. Done in double: float would round
@@ -115,6 +148,26 @@ static void handle_gga(const char *line)
     data.longitude = lon;
     data.altitude_m = alt;
     data.hdop = hdop;
+    taskEXIT_CRITICAL(&lock);
+}
+
+// GST is the receiver's own estimate of how wrong the position is, and the one
+// number that separates a real RTK fix from a receiver claiming one. Most
+// receivers have to be asked for it; see gnss_f9p.c.
+static void handle_gst(const char *line)
+{
+    struct minmea_sentence_gst f;
+    if (!minmea_parse_gst(&f, line)) {
+        return;
+    }
+    float lat = minmea_tofloat(&f.latitude_error_deviation);
+    float lon = minmea_tofloat(&f.longitude_error_deviation);
+    float acc = isfinite(lat) && isfinite(lon) ? sqrtf(lat * lat + lon * lon) : NAN;
+    int64_t now = esp_timer_get_time();
+
+    taskENTER_CRITICAL(&lock);
+    data.accuracy_m = acc;
+    data.accuracy_us = now;
     taskEXIT_CRITICAL(&lock);
 }
 
@@ -301,7 +354,8 @@ static void send_receiver_config(void)
 // Feeds one byte to the UBX side of the stream. NMEA and UBX share the wire.
 static void feed_ubx(uint8_t b)
 {
-    static uint8_t buf[72];  // NAV-PVT's sAcc ends at byte 72
+    // NAV-PVT's sAcc ends at byte 72; the receiver profile sees the first GNSS_UBX_PAYLOAD.
+    static uint8_t buf[72 > GNSS_UBX_PAYLOAD ? 72 : GNSS_UBX_PAYLOAD];
     static uint16_t len, got;
     static uint8_t step, cls, id, ck_a, ck_b;
 
@@ -327,7 +381,11 @@ static void feed_ubx(uint8_t b)
         step = b == ck_a ? 8 : 0;
         return;
     case 8:
-        if (b == ck_b && cls == 0x01 && id == 0x07 && len >= 72) {
+        step = 0;
+        if (b != ck_b) {
+            return;
+        }
+        if (cls == 0x01 && id == 0x07 && len >= 72) {
             // flags (byte 21) bit 0 is gnssFixOK; sAcc is bytes 68-71, mm/s.
             uint32_t sacc = buf[68] | buf[69] << 8 | buf[70] << 16 | (uint32_t)buf[71] << 24;
             float kmh = (buf[21] & 0x01) ? sacc * 0.0036f : NAN;
@@ -335,15 +393,7 @@ static void feed_ubx(uint8_t b)
             data.speed_acc_kmh = kmh;
             taskEXIT_CRITICAL(&lock);
             sacc_us = esp_timer_get_time();
-        } else if (b == ck_b && cls == 0x05 && len >= 2 && buf[0] == 0x06 && buf[1] == 0x8A) {
-            cfg_state = id == 0x01 ? GNSS_CFG_OK : GNSS_CFG_REJECTED;
-            if (id == 0x01) {
-                ESP_LOGI(TAG, "receiver took the motion settings");
-            } else {
-                ESP_LOGW(TAG, "receiver refused the motion settings");
-            }
-        }
-        if (b == ck_b && cls == 0x01 && id == 0x03 && len >= 8) {
+        } else if (cls == 0x01 && id == 0x03 && len >= 8) {
             // flags2 is byte 7; bits 3-4 hold the spoofing state.
             uint8_t spoof = (buf[7] >> 3) & 0x03;
             int64_t now = esp_timer_get_time();
@@ -351,8 +401,19 @@ static void feed_ubx(uint8_t b)
             data.spoof = spoof;
             data.spoof_us = now;
             taskEXIT_CRITICAL(&lock);
+        } else if (cls == 0x05 && len >= 2 && buf[0] == 0x06 && buf[1] == 0x8A && cfg_awaiting) {
+            // Only while the motion settings are the VALSET in flight: the
+            // receiver profile's own configuration is acknowledged the same way.
+            cfg_awaiting = false;
+            cfg_state = id == 0x01 ? GNSS_CFG_OK : GNSS_CFG_REJECTED;
+            if (id == 0x01) {
+                ESP_LOGI(TAG, "receiver took the motion settings");
+            } else {
+                ESP_LOGW(TAG, "receiver refused the motion settings");
+            }
+        } else if (gnss_receiver.ubx) {
+            gnss_receiver.ubx(cls, id, buf, len < GNSS_UBX_PAYLOAD ? len : GNSS_UBX_PAYLOAD);
         }
-        step = 0;
         return;
     default: step = 0; return;
     }
@@ -454,6 +515,8 @@ static void handle_sentence(const char *line)
         check_plausible(data.latitude, data.longitude, data.utc);
     } else if (id == MINMEA_SENTENCE_RMC) {
         handle_rmc(line);
+    } else if (id == MINMEA_SENTENCE_GST) {
+        handle_gst(line);
     }
 }
 
@@ -666,6 +729,7 @@ static void reader_task(void *arg)
     int64_t last_good = baud_since;
     bool locked = false;
     int64_t suspect_us = 0;  // when a sign of spoofing was last seen
+    uint32_t seen = 0;   // checksummed as of the last time anything parsed
 
     for (;;) {
         // Hunt for the rate until something checksums, then stay there.
@@ -673,13 +737,33 @@ static void reader_task(void *arg)
             if (checksummed > 0) {
                 locked = true;
                 cfg_dirty = true;  // a receiver found afresh may have been power cycled
-                ESP_LOGI(TAG, "receiver found at %d baud", data.baud);
-            } else if (esp_timer_get_time() - baud_since > BAUD_TRY_US) {
-                baud_idx = (baud_idx + 1) % (sizeof(BAUDS) / sizeof(BAUDS[0]));
-                if (BAUDS[baud_idx] == CONFIG_RGNSS_GNSS_BAUD && baud_idx != 0) {
-                    baud_idx = (baud_idx + 1) % (sizeof(BAUDS) / sizeof(BAUDS[0]));  // already tried
+                ESP_LOGI(TAG, "%s found at %d baud", gnss_receiver.name, data.baud);
+                // Now that the receiver has proved it is there, tell it how we
+                // want it. A receiver that has been power-cycled has forgotten,
+                // so this runs after every re-lock, not once per boot.
+                int baud = gnss_receiver.configure ? gnss_receiver.configure() : 0;
+                if (baud && baud != data.baud) {
+                    ESP_LOGI(TAG, "moving the link to %d baud", baud);
+                    uart_wait_tx_done(GNSS_UART, pdMS_TO_TICKS(1000));
+                    taskENTER_CRITICAL(&lock);
+                    data.baud = baud;
+                    taskEXIT_CRITICAL(&lock);
+                    uart_set_baudrate(GNSS_UART, baud);
+                    uart_flush_input(GNSS_UART);
+                    len = 0;
+                    // If it did not follow, nothing will parse and the re-lock
+                    // below hunts it down again; start that clock now.
+                    last_good = esp_timer_get_time();
                 }
-                int baud = BAUDS[baud_idx];
+                if (gnss_receiver.configure) {
+                    // The motion settings wait their turn, so the profile's
+                    // answers are in before theirs is being listened for.
+                    cfg_sent_us = esp_timer_get_time();
+                }
+                seen = checksummed;
+            } else if (esp_timer_get_time() - baud_since > BAUD_TRY_US) {
+                baud_idx = next_baud(baud_idx);
+                int baud = baud_at(baud_idx);
                 taskENTER_CRITICAL(&lock);
                 data.baud = baud;
                 taskEXIT_CRITICAL(&lock);
@@ -709,9 +793,11 @@ static void reader_task(void *arg)
         if (locked && cfg_state == GNSS_CFG_PENDING && esp_timer_get_time() - cfg_sent_us > CFG_ANSWER_US) {
             if (cfg_tries++ < CFG_TRIES) {
                 cfg_sent_us = esp_timer_get_time();
+                cfg_awaiting = true;
                 send_receiver_config();
             } else {
                 cfg_state = GNSS_CFG_UNSENT;
+                cfg_awaiting = false;
                 ESP_LOGW(TAG, "receiver never answered the motion settings");
             }
         }
@@ -728,6 +814,7 @@ static void reader_task(void *arg)
                      (int)(RELOCK_US / 1000000));
             locked = false;
             checksummed = 0;
+            seen = 0;
             baud_since = esp_timer_get_time();
         }
         if (n <= 0) {
@@ -743,7 +830,11 @@ static void reader_task(void *arg)
         }
         last_rx = esp_timer_get_time();
         warned = false;
-        if (checksummed) {
+        // Only a sentence that parsed counts as the rate still being right:
+        // at the wrong rate there is no shortage of bytes to read, so taking
+        // any traffic as proof would leave a re-configured receiver stranded.
+        if (checksummed != seen) {
+            seen = checksummed;
             last_good = last_rx;
         }
 
@@ -882,10 +973,12 @@ esp_err_t gnss_start(void)
     data.speed_out_kmh = NAN;
     data.course_out_deg = NAN;
     data.speed_acc_kmh = NAN;
-    data.baud = CONFIG_RGNSS_GNSS_BAUD;
+    data.accuracy_m = NAN;
+    data.receiver = gnss_receiver.name;
+    data.baud = baud_at(0);
 
     const uart_config_t cfg = {
-        .baud_rate = CONFIG_RGNSS_GNSS_BAUD,
+        .baud_rate = data.baud,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -898,8 +991,8 @@ esp_err_t gnss_start(void)
                                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE), TAG, "set pins");
     ESP_RETURN_ON_FALSE(xTaskCreate(reader_task, "gnss", 4096, NULL, 5, NULL) == pdPASS, ESP_ERR_NO_MEM,
                         TAG, "create task");
-    ESP_LOGI(TAG, "reading UART1 (RX GPIO%d, TX GPIO%d), starting at %d baud", CONFIG_RGNSS_GNSS_RX_GPIO,
-             CONFIG_RGNSS_GNSS_TX_GPIO, CONFIG_RGNSS_GNSS_BAUD);
+    ESP_LOGI(TAG, "%s on UART1 (RX GPIO%d, TX GPIO%d), starting at %d baud", gnss_receiver.name,
+             CONFIG_RGNSS_GNSS_RX_GPIO, CONFIG_RGNSS_GNSS_TX_GPIO, data.baud);
     return ESP_OK;
 }
 
@@ -918,5 +1011,80 @@ void gnss_get(gnss_data_t *out)
     if (!out->updated_us || now - out->updated_us > STALE_US) {
         out->implausible = false;
         out->implausible_why[0] = '\0';
+    }
+    // Likewise an accuracy figure: GST can stop while GGA carries on, and a
+    // centimetre left on the page would be the most misleading number on it.
+    if (!out->accuracy_us || now - out->accuracy_us > STALE_US) {
+        out->accuracy_m = NAN;
+    }
+}
+
+void gnss_write(const void *buf, size_t len)
+{
+    uart_write_bytes(GNSS_UART, buf, len);
+}
+
+void gnss_ubx_send(uint8_t cls, uint8_t id, const void *payload, uint16_t len)
+{
+    uint8_t head[6] = {0xB5, 0x62, cls, id, (uint8_t)len, (uint8_t)(len >> 8)};
+    uint8_t ck_a = 0, ck_b = 0;
+    // The checksum covers everything from the class byte to the end of the
+    // payload, i.e. all but the two sync characters.
+    for (size_t i = 2; i < sizeof(head); i++) {
+        ck_a += head[i];
+        ck_b += ck_a;
+    }
+    const uint8_t *p = payload;
+    for (uint16_t i = 0; i < len; i++) {
+        ck_a += p[i];
+        ck_b += ck_a;
+    }
+    uint8_t tail[2] = {ck_a, ck_b};
+
+    gnss_write(head, sizeof(head));
+    if (len) {
+        gnss_write(payload, len);
+    }
+    gnss_write(tail, sizeof(tail));
+}
+
+// Bits 28-30 of a configuration key give the value's width: 1 means a single
+// bit, 2 one byte, 3 two, 4 four, 5 eight. 0 for a key that is malformed.
+static size_t cfg_width(uint32_t key)
+{
+    switch ((key >> 28) & 0x07) {
+    case 1: case 2: return 1;
+    case 3: return 2;
+    case 4: return 4;
+    case 5: return 8;
+    default: return 0;
+    }
+}
+
+void gnss_ubx_valset(const gnss_cfg_t *items, size_t n)
+{
+    uint8_t buf[4 + GNSS_CFG_MAX * 12];
+    buf[0] = 0x00;  // version
+    buf[1] = 0x01;  // layers: RAM only, so the receiver's own flash is untouched
+    buf[2] = 0x00;
+    buf[3] = 0x00;
+    size_t len = 4;
+
+    for (size_t i = 0; i < n && i < GNSS_CFG_MAX; i++) {
+        size_t width = cfg_width(items[i].key);
+        if (!width) {
+            ESP_LOGW(TAG, "configuration key 0x%08lx has no width; skipped", (unsigned long)items[i].key);
+            continue;
+        }
+        for (size_t b = 0; b < 4; b++) {
+            buf[len++] = (uint8_t)(items[i].key >> (8 * b));
+        }
+        // Keys wider than the 32-bit value are zero-filled; none used so far is.
+        for (size_t b = 0; b < width; b++) {
+            buf[len++] = b < 4 ? (uint8_t)(items[i].value >> (8 * b)) : 0;
+        }
+    }
+    if (len > 4) {
+        gnss_ubx_send(0x06, 0x8A, buf, len);
     }
 }

@@ -186,9 +186,11 @@
         <tr><th>Altitude</th><td id="alt">—</td></tr>
         <tr><th>Satellites</th><td id="sats">—</td></tr>
         <tr><th>HDOP</th><td id="hdop">—</td></tr>
+        <tr><th>Accuracy</th><td id="acc">—</td></tr>
         <tr><th>Speed</th><td id="speed">—</td></tr>
         <tr><th>Course</th><td id="course">—</td></tr>
         <tr><th>Time</th><td id="utc">—</td></tr>
+        <tr><th>Receiver</th><td id="receiver">—</td></tr>
       </table>
       <h2>GNSS config</h2>
       <label class="check"><input type="checkbox" id="no-spoofed"> Don't send positions that look spoofed</label>
@@ -522,9 +524,14 @@ function renderGnss(g) {
   $('alt').textContent = num(g.alt, 1, ' m');
   $('sats').textContent = g.sentences ? g.sats : DASH;
   $('hdop').textContent = num(g.hdop, 2);
+  // The receiver's own error estimate, from GST. Centimetres are worth showing
+  // as centimetres: on an RTK fix that is the whole point of the receiver.
+  $('acc').textContent = g.acc == null ? DASH
+    : g.acc < 1 ? `${(g.acc * 100).toFixed(1)} cm` : `${g.acc.toFixed(2)} m`;
   $('speed').textContent = num(g.speed_kmh, 1, ' km/h');
   $('course').textContent = num(g.course, 1, '°');
   $('utc').textContent = g.utc ? g.utc + ' UTC' : DASH;
+  $('receiver').textContent = g.receiver ? `${g.receiver} · ${g.baud} baud` : DASH;
 
   // A status reply sent before the box was clicked would put it back.
   if (Date.now() > view.noSpoofedHeld) $('no-spoofed').checked = g.withhold_spoofed;
