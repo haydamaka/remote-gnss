@@ -194,20 +194,74 @@ error makes the heading error depend on heading. Learning the offset from an
 hour of driving north teaches the compass north's error and applies it
 everywhere.
 
-Keep `Sx, Sy, W` **per 45° sector of measured heading** (8 sectors), and:
+Keep `Sx, Sy, W` **per 30° sector of measured heading** (12 sectors — the same
+division as a traditional compass deviation card), and require **at least 5
+occupied sectors**, reasonably spread, before applying anything.
 
-- require **at least 3 occupied sectors**, each above a minimum weight, before
-  applying anything;
-- take the offset as the mean of the occupied sectors' means, so a sector that
-  was driven for an hour does not outvote one driven for a minute;
-- report the **spread between sectors** — it is a direct, free measurement of
-  how good the magnetometer calibration is, and worth showing next to the
-  calibration quality on the page.
+The sectors are how the data is *collected*. What is *fitted* to them is §3.5.
 
-This is the part that answers "what if we need to update it continuously": it is
-not the *time* structure that needs care, it is the *heading* structure.
+### 3.5 One number, or a correction per direction?
 
-### 3.5 Drift: converge, then fade slowly
+The honest answer is: a curve — but **five coefficients, not a table of
+sectors**, and then the interpolation question disappears because the model is
+already continuous.
+
+**Why not 36 sectors of 10°.** Each accepted window is 8 s of measured-straight
+driving; a good trip yields a few dozen. Spread over 36 bins that is one window
+per bin, so each bin's correction is its own noise, ±2°, injected into a compass
+that was doing better than that unaided. Bins that never fill have to be
+interpolated across — and a spline through noisy bins interpolates the noise as
+faithfully as the signal. Worse, bin edges are discontinuities: the heading
+would visibly step as the vehicle turned through one.
+
+**What the curve can actually be.** After a 9-parameter calibration, the
+residual heading error is not an arbitrary function of heading. First-order
+magnetic deviation can only produce these terms:
+
+```
+δ(H) = A + B·sin H + C·cos H + D·sin 2H + E·cos 2H
+```
+
+This is the classical deviation analysis used to swing a ship's or an
+aircraft's compass, and each term means something specific here:
+
+| term | period | what it is |
+|---|---|---|
+| `A` | constant | **the mounting offset** — the thing this whole document is about |
+| `B, C` | once round | residual **hard-iron**: the calibration's centre is still off |
+| `D, E` | twice round | residual **soft-iron**: the calibration's ellipsoid is still not a sphere |
+
+Five coefficients instead of 36 bins: they fit from ~30 well-spread windows
+rather than hundreds, they are continuous by construction, they cannot produce a
+step at a bin edge, and they cannot represent anything the physics cannot
+produce — which is exactly the smoothing a spline gets wrong.
+
+**The coefficients are worth more as a diagnostic than as a correction.** They
+measure what is still wrong with the magnetometer calibration, in physical
+units:
+
+- a once-round amplitude of `a` radians means the calibration's centre is still
+  off by about `a · H` µT in the horizontal plane, where `H` is the WMM
+  horizontal field — at Kyiv's 19.4 µT, **1° of once-round ⇒ 0.34 µT of
+  leftover hard-iron**, and the phase of `(B, C)` says in which direction;
+- a twice-round amplitude of `a` means the two horizontal axes still differ in
+  scale by about `2a` — **1° of twice-round ⇒ 3.5 % axis asymmetry**.
+
+That second one makes a testable prediction for this device right now: the
+current calibration sits 3.7 % off the sphere, so if that error is mostly
+horizontal asymmetry there should be a twice-round deviation of very close to
+**1°**. If the fitted `D, E` come out near that, the deviation curve and the
+calibration agree about what is wrong — and the right fix is to recalibrate the
+magnetometer, not to paper over it with a correction curve.
+
+**So: apply `A` always, and `B`–`E` only when earned.** A term goes in only if
+its amplitude exceeds twice its own standard error, so a curve is never fitted
+to noise. And say plainly on the page when `B`–`E` are significant, because they
+mean the magnetometer wants recalibrating: correcting the calibration fixes the
+field magnitude and the behaviour off-level too, while a heading curve only fixes
+the heading, only flat, and only in this mounting.
+
+### 3.6 Drift: converge, then fade slowly
 
 A mounting offset is a constant until someone unscrews the module. Two things
 can be wanted from it — settle down and stop moving, or follow a remount — and
@@ -221,7 +275,7 @@ few minutes of driving, holds steady, and still follows a genuine remount within
 a few more minutes. No half-life against wall-clock time — memory should be
 measured in qualifying motion, not in how long the device sat on a shelf.
 
-### 3.6 The first estimate must survive reversing
+### 3.7 The first estimate must survive reversing
 
 A weighted mean has no defence against a reversing car: those samples are a
 clean 180° out and there may be a lot of them in a car park. Once there *is* an
@@ -312,5 +366,8 @@ moved by more than 0.5°: this runs for hours and flash wears out.
   that follows.
 - Whether to let the estimate apply at all while the magnetometer calibration is
   *poor* (§2.1 of CALIBRATION.md), or only at *rough* and better.
-- Whether the sector means should be weighted by sector coverage (a sector
-  driven once is noisy) or trimmed (drop the worst sector of 8).
+- Whether `B`-`E` should ever be applied at all, or only ever reported. A device
+  whose calibration is good has nothing for them to correct, and one whose
+  calibration is bad should be recalibrated rather than curve-fitted. The
+  argument for applying them is the vehicle that cannot easily be recalibrated
+  in place.
