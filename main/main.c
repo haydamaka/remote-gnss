@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 
 #include "gnss.h"
+#include "bearing.h"
 #include "mag_cal.h"
 #include "magnetometer.h"
 #include "mdns_service.h"
@@ -44,6 +45,7 @@ void app_main(void)
     ESP_ERROR_CHECK_WITHOUT_ABORT(gnss_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(magnetometer_start());
     ESP_ERROR_CHECK_WITHOUT_ABORT(mag_cal_init());
+    ESP_ERROR_CHECK_WITHOUT_ABORT(bearing_start());
 
     // Wireless GNSS out to a PC or a phone. Neither is fatal: the web page and
     // the receiver work without them.
