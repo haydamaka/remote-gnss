@@ -63,7 +63,11 @@ class Stats:
         return time.monotonic() - self.started
 
 
-def parse(line: bytes, st: Stats, raw: bool):
+def parse(line: bytes, st: Stats, raw: bool, first: bool = False):
+    # Joining a byte stream lands mid-sentence as often as not, so the first
+    # line of a connection is a fragment rather than a fault.
+    if first and not line.startswith(b"$"):
+        return
     now = time.monotonic()
     if st.last_sentence is not None and now - st.last_sentence > GAP_S:
         st.gaps.append((st.last_sentence - st.started, now - st.last_sentence))
@@ -125,6 +129,7 @@ def status_line(st: Stats) -> str:
 def read_source(source, st: Stats, args, deadline):
     """Feeds lines from an open socket or file object until it ends."""
     buf = b""
+    first = True
     fd = source.fileno()
     last_status = 0.0
     while time.monotonic() < deadline:
@@ -136,7 +141,8 @@ def read_source(source, st: Stats, args, deadline):
             buf += chunk
             while b"\n" in buf:
                 line, buf = buf.split(b"\n", 1)
-                parse(line.strip(b"\r"), st, args.raw)
+                parse(line.strip(b"\r"), st, args.raw, first=first)
+                first = False
             if len(buf) > 4096:
                 buf = b""  # nothing resembling a line; don't grow without bound
 

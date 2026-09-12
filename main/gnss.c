@@ -302,7 +302,11 @@ static void reader_task(void *arg)
                 // the sentence types minmea has no struct for (GSV, GLL, ...)
                 // as well. minmea_check screens out the wreckage the binary
                 // UBX frames leave behind.
-                if (len > 0 && line[0] == '$' && minmea_check(line, false)) {
+                // The shortest real sentence is "$" + a five-character address
+                // + ",". Without the length test a lone 0x24 byte inside a
+                // binary UBX frame, followed by a newline, passes minmea_check
+                // and goes out as a stub sentence.
+                if (len >= 7 && line[0] == '$' && minmea_check(line, false)) {
                     nmea_hub_publish(line, len);
                 }
                 handle_sentence(line);
