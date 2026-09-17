@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_rom_crc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -19,7 +20,10 @@
 #define TAG "bearing"
 #define NVS_NAMESPACE "bearing"
 #define NVS_KEY_STATE "state"
-#define NVS_VERSION 2
+#define NVS_KEY_RUNS "runs%u"  // the kept runs, RUNS_PER_KEY to a key
+#define NVS_VERSION 3          // 3: runs kept raw, estimate tied to a calibration
+#define RUNS_PER_KEY 32        // 512 bytes: a save rewrites only the keys that changed
+#define RUN_KEYS (BEARING_RUNS_MAX / RUNS_PER_KEY)
 
 #define TICK_MS 100          // the receiver and the magnetometer both run at 10 Hz
 #define TRACE_EVERY_S 60.0f  // one trace record per minute of qualifying driving
@@ -38,11 +42,22 @@ typedef struct {
     float run_s;    // ...and the clock the estimator sees, which also runs
                     // while stopped, so a window cannot span a traffic light
     bearing_cal_t cal;
+    uint32_t cal_id;  // the magnetometer calibration cal was learned under
+    uint32_t runs_first, runs_n;
     uint32_t trace_first, trace_n;
     bearing_trace_t trace[BEARING_TRACE_MAX];
 } stored_t;
 
 static stored_t st = {.version = NVS_VERSION, .learning = true};
+
+// What the estimate is made of: the straight runs, raw, in the order they were
+// driven. The estimate itself (st.cal) is kept too, so a restart carries on
+// exactly where it was; the runs are what it is rebuilt from when the
+// magnetometer calibration changes. Saved to NVS a key at a time, separately
+// from st, because a 4 kB blob rewritten every five minutes would need that
+// much free space in a 24 kB partition on every save.
+static bearing_window_t runs[BEARING_RUNS_MAX];
+static uint32_t runs_dirty;  // bit k: key k has changed since it was saved
 
 // One mutex for everything in here. It was a spinlock for the result and a
 // separate mutex for the trace, which left the rest of `st` - the estimator's
@@ -111,11 +126,39 @@ const char *bearing_block_name(bearing_block_t b)
 // ---- storage ----
 
 // Call with st_lock held.
+static void runs_push(const bearing_window_t *r)
+{
+    uint32_t i;
+    if (st.runs_n < BEARING_RUNS_MAX) {
+        i = (st.runs_first + st.runs_n++) % BEARING_RUNS_MAX;
+    } else {
+        i = st.runs_first;  // full: the oldest run goes
+        st.runs_first = (st.runs_first + 1) % BEARING_RUNS_MAX;
+    }
+    runs[i] = *r;
+    runs_dirty |= 1u << (i / RUNS_PER_KEY);
+}
+
+// Call with st_lock held.
 static esp_err_t save_st(void)
 {
     nvs_handle_t nvs;
     esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
     if (err != ESP_OK) {
+        return err;
+    }
+    // Runs before the state that counts them: a save cut short then leaves a
+    // run or two the state does not know about yet, never a count of runs that
+    // were not written.
+    for (unsigned k = 0; k < RUN_KEYS && err == ESP_OK; k++) {
+        if (runs_dirty & (1u << k)) {
+            char key[8];
+            snprintf(key, sizeof(key), NVS_KEY_RUNS, k);
+            err = nvs_set_blob(nvs, key, &runs[k * RUNS_PER_KEY], RUNS_PER_KEY * sizeof(runs[0]));
+        }
+    }
+    if (err != ESP_OK) {
+        nvs_close(nvs);
         return err;
     }
     int keep = st.cal.n;
@@ -128,6 +171,7 @@ static esp_err_t save_st(void)
     nvs_close(nvs);
     if (err == ESP_OK) {
         dirty = false;
+        runs_dirty = 0;
     }
     return err;
 }
@@ -168,8 +212,37 @@ static void load(void)
         st.trace_n = 0;
         st.trace_first = 0;
     }
+    if (st.runs_n > BEARING_RUNS_MAX || st.runs_first >= BEARING_RUNS_MAX) {
+        st.runs_n = st.runs_first = 0;
+    }
+    // Every key that holds a counted run. Missing one, the estimate stays as it
+    // was saved, but there is nothing trustworthy to rebuild it from later.
+    bool runs_ok = true;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        for (unsigned k = 0; k < RUN_KEYS && runs_ok; k++) {
+            bool used = false;
+            for (uint32_t j = 0; j < st.runs_n && !used; j++) {
+                used = (st.runs_first + j) % BEARING_RUNS_MAX / RUNS_PER_KEY == k;
+            }
+            if (used) {
+                char key[8];
+                snprintf(key, sizeof(key), NVS_KEY_RUNS, k);
+                size_t klen = RUNS_PER_KEY * sizeof(runs[0]);
+                runs_ok = nvs_get_blob(nvs, key, &runs[k * RUNS_PER_KEY], &klen) == ESP_OK &&
+                          klen == RUNS_PER_KEY * sizeof(runs[0]);
+            }
+        }
+        nvs_close(nvs);
+    } else {
+        runs_ok = st.runs_n == 0;
+    }
+    if (!runs_ok) {
+        ESP_LOGW(TAG, "the kept straight runs could not be read; a recalibration will start the learning over");
+        st.runs_n = st.runs_first = 0;
+    }
     bearing_cal_result(&st.cal, &latest);  // or it reads as nothing until the next drive
-    ESP_LOGI(TAG, "%.2f h of driving learned so far, %s%s", st.total_s / 3600.0,
+    ESP_LOGI(TAG, "%.2f h of driving learned so far, %u straight runs kept, %s%s", st.total_s / 3600.0,
+             (unsigned)st.runs_n,
              st.learning ? "collecting" : "not collecting",
              st.applying ? ", correcting the heading" : ", shadow only");
     last_trace_s = last_save_s = st.total_s;
@@ -208,8 +281,65 @@ static bool local_field(const gnss_data_t *g, float *decl, float *horizontal)
     return true;
 }
 
+// Identifies a magnetometer calibration by what the heading depends on. 0 for
+// none.
+static uint32_t calibration_id(const mag_cal_params_t *p)
+{
+    if (!p->valid) {
+        return 0;
+    }
+    uint32_t id = esp_rom_crc32_le(0, (const uint8_t *)p->offset, sizeof(p->offset));
+    id = esp_rom_crc32_le(id, (const uint8_t *)p->matrix, sizeof(p->matrix));
+    return id ? id : 1;
+}
+
+// A kept run's heading under calibration p.
+static float run_heading(const mag_cal_params_t *p, const bearing_window_t *r)
+{
+    float raw[3], field[3];
+    bearing_window_field(r, raw);
+    mag_cal_apply_params(p, raw, field);
+    return bearing_cal_heading(field);
+}
+
+// The calibration changed: learn the kept runs again under the new one, in the
+// order they were driven, which gives what the drive would have taught had
+// this calibration been there all along (BEARING-CALIBRATION.md §3.8). What
+// the estimator counted about windows it never kept is carried over; its
+// verdicts on the kept ones are made afresh. Call with st_lock held.
+static void relearn(const mag_cal_params_t *p, uint32_t id)
+{
+    int64_t t0 = esp_timer_get_time();
+    bearing_result_t before = latest;
+
+    bearing_cal_t *c = &st.cal;
+    bearing_cfg_t cfg = c->cfg;
+    uint32_t rejected[BEARING_REASONS];
+    memcpy(rejected, c->rejected, sizeof(rejected));
+    float interval = c->interval;
+    bearing_cal_init(c, &cfg);
+    memcpy(c->rejected, rejected, sizeof(rejected));
+    c->rejected[BEARING_DISAGREES] = 0;
+    c->interval = interval;
+
+    if (p->valid) {
+        for (uint32_t j = 0; j < st.runs_n; j++) {
+            const bearing_window_t *r = &runs[(st.runs_first + j) % BEARING_RUNS_MAX];
+            bearing_cal_add(c, r, run_heading(p, r));
+        }
+    }
+    st.cal_id = id;
+    bearing_cal_result(c, &latest);
+    dirty = true;
+    if (st.runs_n) {
+        ESP_LOGI(TAG, "magnetometer calibration changed: %u straight runs learned again in %lld ms, "
+                 "offset %.1f -> %.1f degrees%s", (unsigned)st.runs_n, (esp_timer_get_time() - t0) / 1000,
+                 before.offset_deg, latest.offset_deg, latest.have ? "" : " (not enough to apply)");
+    }
+}
+
 // Call with st_lock held.
-static void tick(void)
+static void tick(const mag_cal_params_t *p)
 {
     static int64_t last_epoch;
 
@@ -230,7 +360,7 @@ static void tick(void)
     bool have_wmm = local_field(&g, &decl, &horizontal);
 
     float field[3];
-    bool calibrated = mag_cal_apply(m.field_ut, field);
+    bool calibrated = mag_cal_apply_params(p, m.field_ut, field);
     int64_t now_us = esp_timer_get_time();
     bool mag_fresh = m.updated_us && now_us - m.updated_us < MAG_STALE_US;
 
@@ -281,10 +411,17 @@ static void tick(void)
         .course_deg = g.course_deg,
         .speed_mps = isfinite(g.speed_kmh) ? g.speed_kmh / 3.6f : 0.0f,
         .heading_deg = heading,
+        .field_ut = {m.field_ut[0], m.field_ut[1], m.field_ut[2]},
         .decl_deg = decl,
         .usable = usable,
     };
-    bearing_cal_feed(&st.cal, &s);
+    bearing_window_t run;
+    if (bearing_cal_feed(&st.cal, &s, &run) == BEARING_OK) {
+        // Scored the same way a replay scores it, from the stored run, so
+        // learning live and learning again give the same answer.
+        runs_push(&run);
+        bearing_cal_add(&st.cal, &run, run_heading(p, &run));
+    }
 
     bearing_result_t r;
     bearing_cal_result(&st.cal, &r);
@@ -314,8 +451,17 @@ static void bearing_task(void *arg)
             st.total_s += TICK_MS / 1000.0f;
         }
 
+        // Before anything is learned from a new reading: the estimate has to
+        // belong to the calibration those readings are corrected with.
+        mag_cal_params_t p;
+        mag_cal_get_params(&p);
+        uint32_t id = calibration_id(&p);
+        if (id != st.cal_id) {
+            relearn(&p, id);
+        }
+
         if (st.learning) {
-            tick();
+            tick(&p);
             dirty = true;
         }
 
@@ -362,6 +508,7 @@ void bearing_get(bearing_status_t *out)
     out->offset_deg = out->result.offset_deg;
     out->total_hours = st.total_s / 3600.0f;
     out->trace_used = st.trace_n;
+    out->runs_kept = st.runs_n;
     out->fixes_seen = fixes_seen;
     out->fixes_usable = fixes_usable;
     memcpy(out->blocked, blocked, sizeof(out->blocked));
@@ -395,6 +542,7 @@ esp_err_t bearing_reset(void)
     bool was_learning = st.learning, was_applying = st.applying;
     memset(&latest, 0, sizeof(latest));
     memset(&st, 0, sizeof(st));
+    runs_dirty = 0;  // the old keys stay in NVS, uncounted, until overwritten
     st.version = NVS_VERSION;
     st.learning = was_learning;
     st.applying = was_applying;

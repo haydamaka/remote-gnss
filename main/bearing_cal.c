@@ -59,6 +59,7 @@ const char *bearing_reject_name(bearing_reject_t why)
     case BEARING_COURSE_ROUGH:   return "the course wandered";
     case BEARING_HEADING_ROUGH:  return "the heading wandered";
     case BEARING_NOT_TOGETHER:   return "the module turned on its own";
+    case BEARING_FIELD_RANGE:    return "the field is out of range";
     case BEARING_DISAGREES:      return "disagrees with what is known";
     default:                     return "still filling";
     }
@@ -73,7 +74,8 @@ static void window_reset(bearing_cal_t *st)
     st->sum_c = st->sum_tc = st->sum_cc = 0.0f;
     st->sum_h = st->sum_th = st->sum_hh = 0.0f;
     st->sum_d = st->sum_dd = 0.0f;
-    st->head_sum_x = st->head_sum_y = 0.0f;
+    st->course_sum_x = st->course_sum_y = 0.0f;
+    st->field_sum[0] = st->field_sum[1] = st->field_sum[2] = 0.0f;
     st->window_dead = false;
     st->window_why = BEARING_OK;
 }
@@ -233,7 +235,7 @@ static void forget_everything(bearing_cal_t *st)
     st->remounts++;
 }
 
-bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
+bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s, bearing_window_t *out)
 {
     const bearing_cfg_t *c = &st->cfg;
 
@@ -308,9 +310,12 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
     st->sum_d += d;
     st->sum_dd += d * d;
 
-    float hr = s->heading_deg * DEG;
-    st->head_sum_x += cosf(hr);
-    st->head_sum_y += sinf(hr);
+    float cr = (s->course_deg - s->decl_deg) * DEG;
+    st->course_sum_x += cosf(cr);
+    st->course_sum_y += sinf(cr);
+    for (int i = 0; i < 3; i++) {
+        st->field_sum[i] += s->field_ut[i];
+    }
 
     if (t < c->window_s) {
         return BEARING_REASONS;  // still filling
@@ -350,15 +355,11 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
         }
     }
 
-    float delta = 0.0f, mean_head = 0.0f, w = 0.0f;
     if (why == BEARING_OK) {
-        float mean_rel = st->sum_d / (float)n;
-        delta = wrap360(st->d_first + mean_rel);
-        mean_head = wrap360(atan2f(st->head_sum_y, st->head_sum_x) / DEG);
-
         // The window measured its own scatter, so use that rather than a model
         // of how good the fixes should have been. Course errors correlate over
         // a few seconds, so the window is worth dur/5 independent samples.
+        float mean_rel = st->sum_d / (float)n;
         float var = st->sum_dd / (float)n - mean_rel * mean_rel;
         float n_eff = dur / 5.0f;  // course errors correlate over about five seconds
         if (n_eff < 1.0f) {
@@ -367,14 +368,56 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
         if (var < 0.01f) {
             var = 0.01f;  // 0.1 degrees: nothing is better than this
         }
-        w = n_eff / var;
+        float w = n_eff / var;
 
-        if (st->converged) {
-            bearing_result_t r;
-            bearing_cal_result(st, &r);
-            if (fabsf(wrap180(delta - r.offset_deg)) > 3.0f * r.sigma_deg + c->gate_deg) {
-                why = BEARING_DISAGREES;
+        memset(out, 0, sizeof(*out));
+        for (int i = 0; i < 3 && why == BEARING_OK; i++) {
+            float f = st->field_sum[i] / (float)n / BEARING_FIELD_LSB_UT;
+            if (!(fabsf(f) <= 32767.0f)) {
+                why = BEARING_FIELD_RANGE;
+            } else {
+                out->field[i] = (int16_t)lrintf(f);
             }
+        }
+        float course = atan2f(st->course_sum_y, st->course_sum_x) / DEG;
+        out->course_cdeg = (int16_t)lrintf(wrap180(course) * 100.0f);
+        out->weight_q8 = (uint16_t)lrintf(fminf(w, 255.99f) * 256.0f);
+        out->t_ds = s->t > 0.0f ? (uint32_t)lrintf(s->t * 10.0f) : 0;
+    }
+
+    if (why != BEARING_OK) {
+        st->rejected[why]++;
+    }
+    window_reset(st);
+    return why;
+}
+
+void bearing_window_field(const bearing_window_t *w, float field_ut[3])
+{
+    for (int i = 0; i < 3; i++) {
+        field_ut[i] = w->field[i] * BEARING_FIELD_LSB_UT;
+    }
+}
+
+float bearing_cal_heading(const float field_ut[3])
+{
+    return wrap360(atan2f(field_ut[1], field_ut[0]) / DEG);
+}
+
+bearing_reject_t bearing_cal_add(bearing_cal_t *st, const bearing_window_t *win, float heading_deg)
+{
+    const bearing_cfg_t *c = &st->cfg;
+    float t = win->t_ds / 10.0f;
+    float mean_head = wrap360(heading_deg);
+    float delta = wrap360(win->course_cdeg / 100.0f - mean_head);
+    float w = win->weight_q8 / 256.0f;
+    bearing_reject_t why = BEARING_OK;
+
+    if (st->converged) {
+        bearing_result_t r;
+        bearing_cal_result(st, &r);
+        if (fabsf(wrap180(delta - r.offset_deg)) > 3.0f * r.sigma_deg + c->gate_deg) {
+            why = BEARING_DISAGREES;
         }
     }
 
@@ -404,10 +447,10 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
             bearing_result_t after;
             bearing_cal_result(st, &after);
             if (st->q_t0 < 0.0f) {
-                st->q_t0 = s->t;
+                st->q_t0 = t;
                 st->q_a0 = after.offset_deg;
             }
-            float dt = s->t - st->q_t0;
+            float dt = t - st->q_t0;
             float da = wrap180(after.offset_deg - st->q_a0);
             st->q_n += 1.0f;
             st->q_st += dt;
@@ -420,7 +463,7 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
             if (da > st->q_a_max) {
                 st->q_a_max = da;
             }
-            st->q_t_last = s->t;
+            st->q_t_last = t;
         } else {
             if (st->n_seed < BEARING_HOLD) {
                 st->seed[st->n_seed++] = hold;
@@ -431,31 +474,26 @@ bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s)
         }
     } else {
         st->rejected[why]++;
-        if (why == BEARING_DISAGREES) {
-            // Windows that refuse the estimate, one after another. If enough of
-            // them agree with each other, the estimate is what is wrong: the
-            // module has been moved. Start again from them rather than holding
-            // out for readings that will never come.
-            if (st->n_dissent < BEARING_HOLD) {
-                bearing_hold_t hold = {.delta = delta, .head = mean_head, .w = w};
-                st->dissent[st->n_dissent++] = hold;
-            }
-            if (st->n_dissent >= st->cfg.dissent_windows &&
-                hold_spread(st->dissent, st->n_dissent) <= st->cfg.dissent_spread_deg) {
-                forget_everything(st);
-                memcpy(st->seed, st->dissent, sizeof(bearing_hold_t) * (size_t)st->n_dissent);
-                st->n_seed = st->n_dissent;
-                st->n_dissent = 0;
-                if (st->n_seed >= st->cfg.seed_windows) {
-                    release_hold(st);
-                }
-            }
-        } else {
+        // Straight runs that refuse the estimate, one after another. If enough
+        // of them agree with each other, the estimate is what is wrong: the
+        // module has been moved. Start again from them rather than holding out
+        // for readings that will never come. Only straight runs count here,
+        // agreeing or not, so a stored drive replays to the same decisions.
+        if (st->n_dissent < BEARING_HOLD) {
+            bearing_hold_t hold = {.delta = delta, .head = mean_head, .w = w};
+            st->dissent[st->n_dissent++] = hold;
+        }
+        if (st->n_dissent >= st->cfg.dissent_windows &&
+            hold_spread(st->dissent, st->n_dissent) <= st->cfg.dissent_spread_deg) {
+            forget_everything(st);
+            memcpy(st->seed, st->dissent, sizeof(bearing_hold_t) * (size_t)st->n_dissent);
+            st->n_seed = st->n_dissent;
             st->n_dissent = 0;
+            if (st->n_seed >= st->cfg.seed_windows) {
+                release_hold(st);
+            }
         }
     }
-
-    window_reset(st);
     return why;
 }
 

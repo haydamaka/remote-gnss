@@ -29,7 +29,7 @@ int main(void)
 
     printf("bearing_cal_t    %5zu bytes, of which %zu are the sector accumulators\n",
            sizeof(bearing_cal_t), sizeof(st.sx) + sizeof(st.sy) + sizeof(st.sw));
-    printf("                 (only those, plus the trace, need saving to NVS)\n");
+    printf("bearing_window_t %5zu bytes per straight run kept\n", sizeof(bearing_window_t));
     printf("bearing_result_t %5zu bytes\n", sizeof(bearing_result_t));
     printf("bearing_trace_t  %5zu bytes per minute of qualifying driving\n\n",
            sizeof(bearing_trace_t));
@@ -42,9 +42,16 @@ int main(void)
     clock_gettime(CLOCK_MONOTONIC, &a);
     for (int i = 0; i < N; i++) {
         float h = (float)((i / 100) % BEARING_SECTORS) * (360.0f / BEARING_SECTORS) + 15.0f;
+        float hr = h * (float)M_PI / 180.0f;
         bearing_sample_t s = {.t = t, .course_deg = h + 137.0f + 8.6f, .speed_mps = 12.0f,
-                              .heading_deg = h, .decl_deg = 8.6f, .usable = true};
-        bearing_cal_feed(&st, &s);
+                              .heading_deg = h, .field_ut = {19.4f * cosf(hr), 19.4f * sinf(hr), 47.0f},
+                              .decl_deg = 8.6f, .usable = true};
+        bearing_window_t run;
+        if (bearing_cal_feed(&st, &s, &run) == BEARING_OK) {
+            float f[3];
+            bearing_window_field(&run, f);
+            bearing_cal_add(&st, &run, bearing_cal_heading(f));
+        }
         t += 0.1f;
     }
     clock_gettime(CLOCK_MONOTONIC, &b);

@@ -1,8 +1,9 @@
 // Synthetic trips for bearing_cal.c. The vehicle drives, the module is bolted
 // to it at an unknown angle, and the magnetometer has whatever the last
-// calibration left behind. The estimator should recover all of it.
+// calibration left behind. The estimator should recover all of it, and learn
+// the same again from the kept runs when the calibration changes.
 //
-//   cc -O2 -Wall -Wextra -o bearing_test bearing_test.c bearing_cal.c -lm
+//   cc -O2 -Wall -Wextra -I ../main -o bearing_test bearing_test.c ../main/bearing_cal.c -lm
 
 #include "bearing_cal.h"
 
@@ -47,22 +48,51 @@ static float wrap180f(float d)
 
 typedef struct {
     float mount_deg;   // how the module is bolted on: the answer
-    float hard_x_ut;   // what the magnetometer calibration left behind
-    float hard_y_ut;
-    float soft_eps;    // fractional scale error between the two horizontal axes
+    float hard_x_ut;   // what the magnetometer calibration left behind: the raw
+    float hard_y_ut;   // reading carries these, and the calibration a test applies
+    float soft_eps;    // (see calib_t) may or may not take them out
     float h_field_ut;
     float decl_deg;
     float course_sigma_v;  // GNSS velocity noise, m/s
     float heading_sigma;   // magnetometer heading noise, degrees
 } world_t;
 
-// What the magnetometer reads when the vehicle travels at magnetic azimuth psi.
+#define VERTICAL_UT 47.0f  // Kyiv's; nothing here uses it, but a raw reading has one
+
+// The raw reading when the vehicle travels at magnetic azimuth psi and the
+// module has turned a further yaw on its own.
+static void raw_field(const world_t *w, float psi_deg, float yaw_deg, float out[3])
+{
+    float ideal = (psi_deg - w->mount_deg + yaw_deg) * (float)DEG;
+    out[0] = w->h_field_ut * cosf(ideal) + w->hard_x_ut;
+    out[1] = w->h_field_ut * sinf(ideal) * (1.0f + w->soft_eps) + w->hard_y_ut;
+    out[2] = VERTICAL_UT;
+}
+
+// A magnetometer calibration, horizontal part only: b = (m - offset) / scale.
+typedef struct {
+    float off_x, off_y, scale_y;
+} calib_t;
+
+static const calib_t AS_IS = {0.0f, 0.0f, 1.0f};  // leaves the world's errors in
+
+static calib_t exact_for(const world_t *w)
+{
+    return (calib_t){w->hard_x_ut, w->hard_y_ut, 1.0f + w->soft_eps};
+}
+
+static float heading_under(const calib_t *c, const float m[3])
+{
+    float b[3] = {m[0] - c->off_x, (m[1] - c->off_y) / c->scale_y, m[2]};
+    return bearing_cal_heading(b);
+}
+
+// What the magnetometer reads, as a heading, under the uncorrected calibration.
 static float measured_heading(const world_t *w, float psi_deg)
 {
-    float ideal = (psi_deg - w->mount_deg) * (float)DEG;
-    float bx = w->h_field_ut * cosf(ideal) + w->hard_x_ut;
-    float by = w->h_field_ut * sinf(ideal) * (1.0f + w->soft_eps) + w->hard_y_ut;
-    return wrap360f(atan2f(by, bx) / (float)DEG);
+    float m[3];
+    raw_field(w, psi_deg, 0.0f, m);
+    return heading_under(&AS_IS, m);
 }
 
 // What the estimator should end up with, given the world.
@@ -77,8 +107,13 @@ static float predicted_twice_round(const world_t *w)
 
 // ---- driving ----
 
+#define MAX_RUNS 8192
+
 typedef struct {
     bearing_cal_t *cal;
+    calib_t calib;           // the calibration in use while driving
+    bearing_window_t *runs;  // every straight run, as the firmware keeps them
+    int n_runs;
     const world_t *w;
     float t;
     float psi;        // current magnetic azimuth of travel
@@ -90,7 +125,8 @@ typedef struct {
 static void step(trip_t *tr)
 {
     const world_t *w = tr->w;
-    float h = measured_heading(w, tr->psi) + tr->module_yaw + gauss(w->heading_sigma);
+    float m[3];
+    raw_field(w, tr->psi, tr->module_yaw + gauss(w->heading_sigma), m);
     // Course error grows as the speed falls: it comes from Doppler velocity.
     float c_sigma = tr->speed > 0.1f ? atanf(w->course_sigma_v / tr->speed) / (float)DEG : 90.0f;
     float course = wrap360f(tr->psi + w->decl_deg + gauss(c_sigma));
@@ -99,11 +135,20 @@ static void step(trip_t *tr)
         .t = tr->t,
         .course_deg = course,
         .speed_mps = tr->speed,
-        .heading_deg = wrap360f(h),
+        .heading_deg = heading_under(&tr->calib, m),
+        .field_ut = {m[0], m[1], m[2]},
         .decl_deg = w->decl_deg,
         .usable = tr->usable,
     };
-    bearing_cal_feed(tr->cal, &s);
+    bearing_window_t run;
+    if (bearing_cal_feed(tr->cal, &s, &run) == BEARING_OK) {
+        float f[3];
+        bearing_window_field(&run, f);
+        bearing_cal_add(tr->cal, &run, heading_under(&tr->calib, f));
+        if (tr->runs && tr->n_runs < MAX_RUNS) {
+            tr->runs[tr->n_runs++] = run;
+        }
+    }
     tr->t += DT * (1.0f + 0.08f * (uniform() - 0.5f) * 2.0f);  // fixes are not a metronome
 }
 
@@ -180,7 +225,7 @@ static void test_mounting_offset(void)
     cfg.h_field_ut = w.h_field_ut;
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     town_trip(&tr, 12, 30.0f, 12.0f);
 
@@ -205,7 +250,7 @@ static void test_deviation_is_measured(void)
     cfg.h_field_ut = w.h_field_ut;
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     town_trip(&tr, 12, 40.0f, 15.0f);
     town_trip(&tr, 12, 40.0f, 15.0f);
@@ -242,7 +287,7 @@ static void test_turning_is_rejected(void)
     bearing_cal_defaults(&cfg);
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     tr.speed = 12.0f;
     for (int i = 0; i < 40; i++) {
@@ -265,7 +310,7 @@ static void test_one_direction_only(void)
     bearing_cal_defaults(&cfg);
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     for (int i = 0; i < 20; i++) {
         drive_turn(&tr, 40.0f, 25.0f);
@@ -290,7 +335,7 @@ static void test_reversing_and_tunnels(void)
     bearing_cal_defaults(&cfg);
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     for (int i = 0; i < 12; i++) {
         float heading = wrap360f((float)i * 30.0f + 7.0f);
@@ -334,7 +379,7 @@ static void test_remount(void)
     bearing_cal_defaults(&cfg);
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     town_trip(&tr, 12, 40.0f, 14.0f);
     bearing_result_t r;
@@ -375,7 +420,7 @@ static void test_quality_catches_drift(void)
     cfg.weight_cap = 60.0f;  // a shorter memory, or it cannot follow anything
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     float start = 100.0f;
     for (int i = 0; i < 60; i++) {
@@ -401,7 +446,7 @@ static void test_quality_when_steady(void)
     cfg.weight_cap = 60.0f;
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     for (int i = 0; i < 60; i++) {
         town_trip(&tr, 12, 30.0f, 14.0f);
@@ -427,7 +472,7 @@ static void test_one_hertz_receiver(void)
     cfg.h_field_ut = w.h_field_ut;
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     for (int i = 0; i < 6; i++) {
         town_trip(&tr, 12, 40.0f, 15.0f);
@@ -453,7 +498,7 @@ static void test_reversing_in_the_seed(void)
     bearing_cal_defaults(&cfg);
     bearing_cal_t cal;
     bearing_cal_init(&cal, &cfg);
-    trip_t tr = {.cal = &cal, .w = &w, .usable = true};
+    trip_t tr = {.cal = &cal, .calib = AS_IS, .w = &w, .usable = true};
 
     // One window's worth of backing out of a drive - the module points
     // forwards while travel goes the other way - then an ordinary trip. The
@@ -472,6 +517,86 @@ static void test_reversing_in_the_seed(void)
     check("offset, not dragged by the reversing", r.offset_deg, w.mount_deg, 2.0f);
 }
 
+// Learns again from kept runs, as the firmware does after a recalibration.
+static void replay(const trip_t *tr, const bearing_cfg_t *cfg, const calib_t *c, bearing_cal_t *out)
+{
+    bearing_cal_init(out, cfg);
+    for (int i = 0; i < tr->n_runs; i++) {
+        float f[3];
+        bearing_window_field(&tr->runs[i], f);
+        bearing_cal_add(out, &tr->runs[i], heading_under(c, f));
+    }
+}
+
+static float worst_error(const world_t *w, const calib_t *c, const bearing_result_t *r)
+{
+    float worst = 0.0f;
+    for (float psi = 0.0f; psi < 360.0f; psi += 5.0f) {
+        float m[3];
+        raw_field(w, psi, 0.0f, m);
+        float e = fabsf(wrap180f(bearing_cal_correct(r, heading_under(c, m)) - psi));
+        if (e > worst) {
+            worst = e;
+        }
+    }
+    return worst;
+}
+
+// What the firmware stores has to be independent of the calibration: a drive
+// under a poor calibration, replayed under a good one, should teach exactly
+// what the same drive would have taught under the good one from the start.
+static void test_recalibration_reuses_the_drive(void)
+{
+    printf("\nA drive under a poor calibration, then a good one\n");
+    // 1.5 uT of hard iron is about 4.4 degrees of once-round at this field,
+    // 8 %% of axis asymmetry about 2.3 degrees of twice-round.
+    world_t w = {.mount_deg = 63.0f, .hard_x_ut = 1.5f, .hard_y_ut = -0.6f, .soft_eps = 0.08f,
+                 .h_field_ut = 19.4f, .decl_deg = 8.6f, .course_sigma_v = 0.05f, .heading_sigma = 0.3f};
+    bearing_cfg_t cfg;
+    bearing_cal_defaults(&cfg);
+    cfg.h_field_ut = w.h_field_ut;
+    static bearing_window_t runs[MAX_RUNS];
+    bearing_cal_t live;
+    bearing_cal_init(&live, &cfg);
+    trip_t tr = {.cal = &live, .calib = AS_IS, .runs = runs, .w = &w, .usable = true};
+    town_trip(&tr, 12, 40.0f, 15.0f);
+    town_trip(&tr, 12, 40.0f, 15.0f);
+
+    bearing_result_t r_live, r_same, r_good;
+    bearing_cal_result(&live, &r_live);
+    printf("    %d runs kept; under the poor calibration: offset %.2f, once-round %.2f, twice-round %.2f\n",
+           tr.n_runs, r_live.offset_deg, r_live.once_round_deg, r_live.twice_round_deg);
+
+    bearing_cal_t same;
+    replay(&tr, &cfg, &AS_IS, &same);
+    bearing_cal_result(&same, &r_same);
+    check("replayed as it was: offset unchanged", r_same.offset_deg, r_live.offset_deg, 0.001f);
+    check("replayed as it was: once-round unchanged", r_same.once_round_deg, r_live.once_round_deg, 0.001f);
+    check_true("replayed as it was: same windows", r_same.windows == r_live.windows, true);
+
+    calib_t good = exact_for(&w);
+    bearing_cal_t rescored;
+    replay(&tr, &cfg, &good, &rescored);
+    bearing_cal_result(&rescored, &r_good);
+    report_rejects(&r_good);
+    check_true("applies it", r_good.have, true);
+    check("offset under the good calibration", r_good.offset_deg, w.mount_deg, 1.0f);
+    check("once-round, now nothing left", r_good.once_round_deg, 0.0f, 0.6f);
+    check("twice-round, now nothing left", r_good.twice_round_deg, 0.0f, 0.6f);
+    check("worst corrected heading error", worst_error(&w, &good, &r_good), 0.0f, 0.8f);
+
+    // And the same drive, learned under the good calibration all along.
+    rng_state = 777;
+    bearing_cal_t fresh;
+    bearing_cal_init(&fresh, &cfg);
+    trip_t tr2 = {.cal = &fresh, .calib = good, .w = &w, .usable = true};
+    town_trip(&tr2, 12, 40.0f, 15.0f);
+    town_trip(&tr2, 12, 40.0f, 15.0f);
+    bearing_result_t r_fresh;
+    bearing_cal_result(&fresh, &r_fresh);
+    check("agrees with learning it fresh", r_good.offset_deg, r_fresh.offset_deg, 0.5f);
+}
+
 int main(void)
 {
     test_mounting_offset();
@@ -484,6 +609,7 @@ int main(void)
     test_quality_catches_drift();
     test_one_hertz_receiver();
     test_reversing_in_the_seed();
+    test_recalibration_reuses_the_drive();
     printf("\n%s (%d failure%s)\n", failures ? "FAILED" : "all passed", failures,
            failures == 1 ? "" : "s");
     return failures ? 1 : 0;

@@ -185,7 +185,8 @@ round trip through Save and Load restored all 355.
 | `webserver.c` `req_scratch[4096]` | 4,096 | the shared request arena, sized by the largest user. |
 | `webserver.c` `samples[…]` | 1,280 | the magnetometer sample batch for `/api/mag/samples`. |
 | `magnetometer.c` `history[256]` | 4,096 | lower it again if the recorder's dropout tolerance is not wanted. |
-| `bearing.c` `st` | 3,036 | the learning state and the drive trace. Persistent by design; the trace is 1,920 of it and halves to one hour if needed. |
+| `bearing.c` `st` | 3,068 | the learning state and the drive trace. Persistent by design; the trace is 1,920 of it and halves to one hour if needed. |
+| `bearing.c` `runs[256]` | 4,096 | the straight runs the estimate is rebuilt from after a recalibration (BEARING-CALIBRATION.md §3.8). Could live only in NVS and be streamed during a replay, at the cost of reading eight keys every time; the ring halves to 128 runs if needed. |
 | `mag_cal.c` `packed[400][3]` | 2,400 | the NVS staging buffer, shared between save and load. Needed whenever the readings are written or read. |
 | `mag_cal.c` `by_age[400]` | 800 | ordering scratch for the same save. |
 

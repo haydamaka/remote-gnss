@@ -291,6 +291,52 @@ estimate, §4's gate rejects them. Getting the first one needs something robust:
 take the **circular median** of the first 20 qualifying samples, then switch to
 the weighted mean from §3.1 seeded with it.
 
+### 3.8 A new magnetometer calibration must not throw the drive away
+
+Every quantity above is measured against the *calibrated* heading, and the
+deviation terms of §3.5 are, by design, a measurement of what that calibration
+got wrong. So an estimate built from sector sums belongs to the calibration it
+was learned under: recalibrate, and the stored deltas, the sectors they were
+filed in, and above all `B`–`E` are describing a magnetometer that no longer
+exists.
+
+What does not depend on the calibration is what was measured: the GNSS course
+and the raw field. So each straight run that passes the gates of §3.3 is kept
+as exactly that — 16 bytes:
+
+| field | |
+|---|---|
+| time | tenths of a second on the estimator's clock |
+| magnetic course | GNSS course less declination, centidegrees |
+| weight | §3.2, from the run's own scatter, ×256 |
+| mean raw field | X, Y, Z in the sensor's axes, 0.05 µT |
+
+Averaging the *raw* field over the run loses nothing: a calibration is affine,
+`b = M(m − o)`, and the calibrated mean is the mean of the calibrated readings.
+
+Learning is then two steps. Collecting judges the window and produces the run;
+scoring takes the run's heading under the calibration in use and does
+everything from §3.4 on — the gate against the estimate, the seed, the sectors,
+the quality figures. Live, a run is scored the moment it is kept. When the
+calibration changes, the estimator is cleared and every kept run is scored
+again, in the order it was driven. That is what the drive would have taught had
+the new calibration been there all along; `tools/bearing_test.c` checks both
+halves of that claim — replayed under the old calibration the estimate is
+identical, replayed under an exact one it matches learning the same drive fresh
+under it (63.02° against 63.01°, with `B`–`E` gone).
+
+Two consequences:
+
+- **Remount detection counts straight runs only.** It used to reset its run of
+  disagreeing windows on any rejected window as well; those are not kept, so a
+  replay could not reproduce it. Turns between straight runs are ordinary, and
+  counting only the runs is the better rule anyway.
+- **The kept runs are a ring of 256.** A trip gives a few dozen, and a run that
+  falls off the end has faded to a few per cent of its weight by then (§3.6), so
+  a replay loses little. The estimate itself is saved too, so a restart carries
+  on exactly where it was; the runs are only replayed when the calibration
+  actually changes, identified by a CRC of its offset and matrix.
+
 ## 4. When a window counts
 
 Every one of these must hold for the **whole** window, or it is dropped —
@@ -335,19 +381,23 @@ not here.
 
 ## 6. Storage and API
 
-NVS namespace `mag`, alongside `hdg_off`:
+NVS namespace `bearing`, written every five minutes of qualifying driving and
+whenever a setting changes:
 
 | key | what |
 |---|---|
-| `hdg_auto` | the checkbox |
-| `hdg_acc` | the 8 sectors' `Sx, Sy, W` — 96 bytes |
+| `state` | the switches, the clocks, the estimator (§3), the CRC of the calibration it belongs to, where the ring of runs starts and how full it is, and the minute-by-minute trace — about 3 kB |
+| `runs0`…`runs7` | the kept straight runs of §3.8, 32 to a key, 512 bytes each; only the keys that changed are rewritten |
 
-Write on change only, at most once every 5 minutes, and only when the offset
-moved by more than 0.5°: this runs for hours and flash wears out.
+The runs are split across keys rather than kept in `state` because NVS writes a
+blob's new copy before erasing the old one, and a 7 kB blob every five minutes
+would need that much free in a 24 kB partition that also holds the
+magnetometer calibration and the PHY data.
 
-`POST /api/heading` gains `auto=0|1`. `/api/status` gains, under `mag`:
-`heading_auto`, `heading_learned`, `heading_conf` (degrees), `heading_samples`,
-`heading_sectors`, `heading_spread`.
+`GET /api/bearing` reports what has been learned, how steady it is, and `runs`,
+the straight runs kept. `POST /api/bearing` takes `learning`, `applying`,
+`reset` and `save`; `reset=1` forgets the estimate and the runs. The page's
+**Reset adjustment data** button sends that.
 
 ## 7. What this cannot do
 
@@ -432,7 +482,9 @@ followed within a few trips.
 
 **Cost.** 1096 bytes of state, of which the 144 bytes of sector accumulators are
 the part that matters; the firmware saves the lot, plus a 120-record trace, as
-one 3 kB NVS blob. 7.4 kB of code compiled for the ESP32-C3. 0.06 µs
+one 3 kB NVS blob, and the 256 kept runs of §3.8 as another 4 kB in eight keys
+(4 kB of RAM too). Re-scoring them after a recalibration is 256 scorings of
+about 5 µs each on the host. 7.4 kB of code compiled for the ESP32-C3. 0.06 µs
 per fix and 1.1 µs per fit on the host — so a few microseconds per fix and well
 under a millisecond per window in software floating point, against one window
 every eight seconds.

@@ -110,3 +110,10 @@ size_t mag_cal_stack_free(void);
 
 // Applies the calibration in use; copies m when there is none. False if none.
 bool mag_cal_apply(const float m[3], float b[3]);
+
+// The calibration in use, for a caller that has to apply one and the same
+// calibration to many readings, and notice when it changes.
+void mag_cal_get_params(mag_cal_params_t *out);
+
+// Applies p; copies m when p is not valid. False if it is not.
+bool mag_cal_apply_params(const mag_cal_params_t *p, const float m[3], float b[3]);

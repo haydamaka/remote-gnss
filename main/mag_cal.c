@@ -985,18 +985,29 @@ size_t mag_cal_stack_free(void)
     return task ? uxTaskGetStackHighWaterMark(task) * sizeof(StackType_t) : 0;
 }
 
-bool mag_cal_apply(const float m[3], float b[3])
+void mag_cal_get_params(mag_cal_params_t *out)
 {
     xSemaphoreTake(lock, portMAX_DELAY);
-    mag_cal_params_t p = params;
+    *out = params;
     xSemaphoreGive(lock);
-    if (!p.valid) {
+}
+
+bool mag_cal_apply_params(const mag_cal_params_t *p, const float m[3], float b[3])
+{
+    if (!p->valid) {
         memcpy(b, m, 3 * sizeof(float));
         return false;
     }
-    float d[3] = {m[0] - p.offset[0], m[1] - p.offset[1], m[2] - p.offset[2]};
+    float d[3] = {m[0] - p->offset[0], m[1] - p->offset[1], m[2] - p->offset[2]};
     for (int i = 0; i < 3; i++) {
-        b[i] = p.matrix[3 * i] * d[0] + p.matrix[3 * i + 1] * d[1] + p.matrix[3 * i + 2] * d[2];
+        b[i] = p->matrix[3 * i] * d[0] + p->matrix[3 * i + 1] * d[1] + p->matrix[3 * i + 2] * d[2];
     }
     return true;
+}
+
+bool mag_cal_apply(const float m[3], float b[3])
+{
+    mag_cal_params_t p;
+    mag_cal_get_params(&p);
+    return mag_cal_apply_params(&p, m, b);
 }

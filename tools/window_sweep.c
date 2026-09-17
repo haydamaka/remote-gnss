@@ -25,22 +25,33 @@ static float w180(float d) { d = fmodf(d + 180.0f, 360.0f); if (d < 0) d += 360;
 #define HARD_X 0.34f
 #define SOFT_EPS 0.037f
 
+static void measured_field(float psi, float noise, float out[3]) {
+    float ideal = (psi - MOUNT + noise) * (float)DEGR;
+    out[0] = HFIELD * cosf(ideal) + HARD_X;
+    out[1] = HFIELD * sinf(ideal) * (1.0f + SOFT_EPS);
+    out[2] = 47.0f;
+}
 static float measured(float psi) {
-    float ideal = (psi - MOUNT) * (float)DEGR;
-    float bx = HFIELD * cosf(ideal) + HARD_X;
-    float by = HFIELD * sinf(ideal) * (1.0f + SOFT_EPS);
-    return w360(atan2f(by, bx) / (float)DEGR);
+    float m[3];
+    measured_field(psi, 0.0f, m);
+    return bearing_cal_heading(m);
 }
 
 typedef struct { bearing_cal_t *cal; float t, psi, speed; } trip_t;
 
 static void step(trip_t *tr) {
     float c_sigma = tr->speed > 0.1f ? atanf(0.05f / tr->speed) / (float)DEGR : 90.0f;
+    float m[3];
+    measured_field(tr->psi, gauss(0.5f), m);
     bearing_sample_t s = {.t = tr->t, .course_deg = w360(tr->psi + DECL + gauss(c_sigma)),
-                          .speed_mps = tr->speed,
-                          .heading_deg = measured(tr->psi) + gauss(0.5f),
-                          .decl_deg = DECL, .usable = true};
-    bearing_cal_feed(tr->cal, &s);
+                          .speed_mps = tr->speed, .heading_deg = bearing_cal_heading(m),
+                          .field_ut = {m[0], m[1], m[2]}, .decl_deg = DECL, .usable = true};
+    bearing_window_t run;
+    if (bearing_cal_feed(tr->cal, &s, &run) == BEARING_OK) {
+        float f[3];
+        bearing_window_field(&run, f);
+        bearing_cal_add(tr->cal, &run, bearing_cal_heading(f));
+    }
     tr->t += DT;
 }
 static void straight(trip_t *tr, float h, float sp, float sec) {

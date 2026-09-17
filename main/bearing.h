@@ -20,6 +20,12 @@
 // RAM is the binding constraint on this board once WiFi and BLE have theirs.
 #define BEARING_TRACE_MAX 120
 
+// Straight runs kept, so a new magnetometer calibration can re-score the drive
+// instead of discarding it. Each is 16 bytes. A trip yields a few dozen, and by
+// the time one falls off the end its weight has long faded (§3.6), so this is
+// the useful memory of the estimate, not a log.
+#define BEARING_RUNS_MAX 256
+
 // Why a fix never even got as far as a window. Without this, a drive that
 // produced nothing looks the same as a drive that was never attempted.
 typedef enum {
@@ -43,6 +49,7 @@ typedef struct {
     float offset_deg;
     float total_hours;     // qualifying driving, across restarts
     uint32_t trace_used;
+    uint32_t runs_kept;    // straight runs stored, up to BEARING_RUNS_MAX
     uint32_t stack_free;   // bytes the task has never used
     uint32_t fixes_seen, fixes_usable;
     uint32_t blocked[BEARING_BLOCKS];

@@ -6,13 +6,19 @@
 // Learning the compass bearing offset from GNSS, per BEARING-CALIBRATION.md.
 //
 // Feed it fixes as they arrive. It collects them into windows of measured-
-// straight travel (§3.3), emits one sample per accepted window, sorts those
-// into 12 sectors of heading (§3.4), and fits the five deviation coefficients
+// straight travel (§3.3), and hands back each one that passes as a
+// bearing_window_t: the magnetic course and the mean *raw* field, before any
+// magnetometer calibration. The caller keeps those, works out each one's
+// heading under the calibration in use, and adds it; the estimator sorts them
+// into 12 sectors of heading (§3.4) and fits the five deviation coefficients
 // A, B, C, D, E to the sector means (§3.5).
 //
+// Collecting and scoring are split so that a new magnetometer calibration does
+// not throw a drive away: the kept windows are added again under the new one
+// and give what the drive would have taught with it (§3.8).
+//
 // No RTOS, no storage, no floating-point library beyond libm: this is the part
-// that can be tested on a host. The sector accumulators are the only state
-// worth saving between runs.
+// that can be tested on a host.
 
 #define BEARING_SECTORS 12  // 30 degrees each, as a compass deviation card
 
@@ -41,9 +47,24 @@ typedef struct {
     float course_deg;   // GNSS course over ground, referenced to true north
     float speed_mps;
     float heading_deg;  // magnetic heading as measured, no offset applied
+    float field_ut[3];  // the raw reading behind it, before calibration
     float decl_deg;     // magnetic declination here, from the WMM
     bool  usable;       // fix good, not spoofed, field magnitude plausible
 } bearing_sample_t;
+
+// One straight run, as it is kept: nothing in it depends on the magnetometer
+// calibration, so it can be scored again under any later one. The raw field is
+// averaged over the run, which is exact for any calibration: an affine map of
+// the mean is the mean of the mapped readings.
+#define BEARING_FIELD_LSB_UT 0.05f  // ±1638 µT, beyond any compass-usable field
+
+typedef struct {
+    uint32_t t_ds;        // end of the run on the estimator's clock, tenths of a second
+    int16_t  course_cdeg; // magnetic course over ground (GNSS course less declination), signed
+    uint16_t weight_q8;   // how much it counts, times 256: its own scatter, §3.3
+    int16_t  field[3];    // mean raw field in the sensor's axes, BEARING_FIELD_LSB_UT
+    uint16_t reserved;
+} bearing_window_t;
 
 // Why a window was thrown away. Counted, so the page can say what the drive
 // was mostly doing instead of contributing.
@@ -58,6 +79,7 @@ typedef enum {
     BEARING_COURSE_ROUGH,  // scatter about the line
     BEARING_HEADING_ROUGH,
     BEARING_NOT_TOGETHER,  // the module yawed and the vehicle did not
+    BEARING_FIELD_RANGE,   // the mean field does not fit in a bearing_window_t
     BEARING_DISAGREES,     // reversing, crabbing, a transient
     BEARING_REASONS
 } bearing_reject_t;
@@ -138,7 +160,8 @@ typedef struct {
     float head_unwrapped, h_prev, sum_h, sum_th, sum_hh;
     float d_first, sum_d, sum_dd;   // delta, relative to the window's first
     float speed_min, speed_max;
-    float head_sum_x, head_sum_y;   // mean heading, for picking the sector
+    float course_sum_x, course_sum_y;  // mean magnetic course
+    float field_sum[3];             // mean raw field
     float interval;                 // the receiver's own fix interval, learned
     bool  window_dead;              // a gate failed; run it out and drop it
     bearing_reject_t window_why;
@@ -174,8 +197,22 @@ typedef struct {
 void bearing_cal_init(bearing_cal_t *st, const bearing_cfg_t *cfg);
 
 // Feeds one fix. Returns the outcome of a window if one just ended, else
-// BEARING_REASONS as "still filling".
-bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s);
+// BEARING_REASONS as "still filling". BEARING_OK means a straight run, written
+// to *out; it has not been learned from yet - that is bearing_cal_add().
+bearing_reject_t bearing_cal_feed(bearing_cal_t *st, const bearing_sample_t *s, bearing_window_t *out);
+
+// Learns from one straight run, given its heading under the calibration in
+// use: bearing_cal_heading() of the calibrated window field. BEARING_OK, or
+// BEARING_DISAGREES when it was refused against what is already known.
+// Adding the same windows in the same order under the same calibration gives
+// the same estimate, whether live or replayed from storage.
+bearing_reject_t bearing_cal_add(bearing_cal_t *st, const bearing_window_t *w, float heading_deg);
+
+// A window's mean raw field, in µT.
+void bearing_window_field(const bearing_window_t *w, float field_ut[3]);
+
+// Heading, 0..360, of a calibrated field in the sensor's axes.
+float bearing_cal_heading(const float field_ut[3]);
 
 // The current estimate. Cheap enough to call per page refresh.
 void bearing_cal_result(const bearing_cal_t *st, bearing_result_t *out);

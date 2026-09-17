@@ -84,8 +84,9 @@
   /* ...except the file pair, which shares a row in equal halves. */
   .cal-info .buttons.pair { flex-direction: row; margin-top: 0; }
   .cal-info .buttons.pair button { flex: 1; padding-inline: 8px; }
-  /* Under the compass, one row: turn the card to where north really is. */
-  .north { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  /* Under the compass, two rows: set the bearing by hand, then let driving set it. */
+  .north { flex: 1 0 100%; display: flex; flex-direction: column; gap: 8px; }
+  .north .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
   /* One size for the whole row: the label, the box, the button and the readout. */
   .north label, .north .note { display: flex; align-items: center; gap: 6px; font-size: 15px; color: var(--muted); margin: 0; }
   .north input { width: 5.5em; text-align: right; padding: 6px 8px; }
@@ -214,14 +215,19 @@
           </div>
         </div>
         <div class="north" id="north">
-          <label>Bearing
-            <input type="number" id="north-bearing" step="0.1" inputmode="decimal"
-                   aria-label="The bearing the module is pointing along, in degrees">
-            <span>°</span>
-          </label>
-          <button class="secondary" type="button" id="north-set">Set bearing</button>
-          <label><input type="checkbox" id="auto-adjust"> Automatic adjustment</label>
-          <p class="note" id="north-note"></p>
+          <div class="row">
+            <label>Bearing
+              <input type="number" id="north-bearing" step="0.1" inputmode="decimal"
+                     aria-label="The bearing the module is pointing along, in degrees">
+              <span>°</span>
+            </label>
+            <button class="secondary" type="button" id="north-set">Set bearing</button>
+            <p class="note" id="north-note"></p>
+          </div>
+          <div class="row">
+            <label><input type="checkbox" id="auto-adjust"> Automatic adjustment</label>
+            <button class="secondary" type="button" id="auto-reset">Reset adjustment data</button>
+          </div>
         </div>
       </div>
     </section>
@@ -812,6 +818,15 @@ $('auto-adjust').onchange = () => {
   updateBearingControls();
   northSays(on ? 'Adjusting itself from now on, as you drive.' : 'Automatic adjustment off.');
   bearingPost(`learning=${on ? 1 : 0}&applying=${on ? 1 : 0}`);
+};
+// Everything driving has taught it, and the straight runs it learned from. The
+// switch stays where it is: with it on, learning starts again from nothing.
+$('auto-reset').onclick = async () => {
+  if (!confirm('Forget everything learned from driving?')) return;
+  $('auto-reset').disabled = true;
+  northSays('Adjustment data reset.');
+  await bearingPost('reset=1');
+  $('auto-reset').disabled = false;
 };
 
 const quantile = (sorted, q) => sorted[Math.floor(q * (sorted.length - 1))];

@@ -182,6 +182,16 @@ trusted. Two independent sources, because either alone can be fooled:
   - When nothing qualifies, it says what stopped it — no fix, faked signals,
     too few satellites, an uncalibrated magnetometer, a disturbed field — so a
     fruitless drive can be told apart from one that never got going.
+  - The offset data collected while driving is stored relative to the field
+    vector, not the bearing, so it is invariant to the magnetometer
+    calibration, and it is stored in NVS. A recalibration also recalibrates the
+    offset, reusing what was already collected: each straight run is kept with
+    its raw field vector and magnetic course, and they are all learned again
+    under the new calibration ([BEARING-CALIBRATION.md](BEARING-CALIBRATION.md)
+    §3.8).
+  - A **Reset adjustment data** button. The row under the compass holds the
+    bearing, **Set bearing** and the offset; the row below it, **Automatic
+    adjustment** and **Reset adjustment data**.
 
 ## Magnetometer readings
 

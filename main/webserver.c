@@ -600,6 +600,7 @@ static esp_err_t bearing_get_handler(httpd_req_t *req)
     json_int(&j, "terms", b.result.terms);
     json_int(&j, "remounts", (int)b.result.remounts);
     json_int(&j, "trace", (int)b.trace_used);
+    json_int(&j, "runs", (int)b.runs_kept);
     json_num(&j, "once_round", b.result.once_round_deg, 2);
     json_num(&j, "twice_round", b.result.twice_round_deg, 2);
     json_num(&j, "residual_hard_ut", b.result.residual_hard_ut, 3);
