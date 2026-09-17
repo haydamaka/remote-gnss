@@ -273,6 +273,17 @@ static esp_err_t status_get(httpd_req_t *req)
     json_num(&j, "y", m.updated_us ? field[1] : NAN, 2);
     json_num(&j, "z", m.updated_us ? field[2] : NAN, 2);
     json_num(&j, "heading_offset", magnetometer_heading_offset(), 1);
+    json_open(&j, "radio");
+    json_int(&j, "clean", m.samples_clean);
+    json_int(&j, "corrected", m.samples_corrected);
+    json_int(&j, "skipped", m.samples_skipped);
+    json_key(&j, "offset");
+    if (m.radio_offset_learned) {
+        json_append(&j, "[%.1f,%.1f,%.1f]", m.radio_offset_ut[0], m.radio_offset_ut[1], m.radio_offset_ut[2]);
+    } else {
+        json_append(&j, "null");
+    }
+    json_close(&j);
     // What driving has taught the compass, but only once the user has asked for
     // it to be used. The page applies it the same way it applies the manual
     // offset, to both the readout and the card.

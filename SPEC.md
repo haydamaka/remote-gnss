@@ -161,6 +161,26 @@ trusted. Two independent sources, because either alone can be fooled:
     too few satellites, an uncalibrated magnetometer, a disturbed field — so a
     fruitless drive can be told apart from one that never got going.
 
+## Magnetometer readings
+
+- The noise in the readings is periodic. Filter it in software (EMI is also to
+  be fixed in hardware), and read the magnetometer at a higher rate.
+- Can't we figure out the WiFi beacon interval and cancel out those readings?
+- Measured on 2026-09-16 with the module still: while the WiFi radio is
+  powered, the IST8310 reads about 31 µT off along a fixed direction in its own
+  axes, and transmissions push it to 26-48 µT. In modem sleep the radio powers
+  up and down many times a second, for beacons and for traffic, so a third to
+  two thirds of the readings were off. Turning power save off makes the offset
+  constant but costs current, so instead:
+  - The firmware learns from the WiFi driver itself when the radio is powered
+    (its `esp_phy_enable`/`esp_phy_disable` calls, wrapped at link time), not
+    from the beacon interval, which says nothing about traffic.
+  - The chip is read at 100 Hz. Each 10 Hz sample is the per-axis median of the
+    reads taken with the radio off; with none in the 100 ms, the median of the
+    radio-on reads less the learned offset; with neither, no sample.
+  - `GET /api/status` reports under `mag.radio` how many samples came each way
+    and the learned offset.
+
 ## Magnetometer calibration
 
 - Calibrate the hard- and soft-iron distortion iteratively: keep taking

@@ -1,15 +1,23 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "esp_err.h"
 
-// Latest magnetometer sample, in the sensor's own axes, uncalibrated.
+// Latest magnetometer sample, in the sensor's own axes, uncalibrated. A sample
+// comes from ten reads of the chip at 100 Hz, with the WiFi radio's disturbance
+// taken out; see sample_task() in magnetometer.c.
 typedef struct {
     const char *chip;     // detected chip, NULL if none was found
     int64_t updated_us;   // esp_timer time of the last sample, 0 if none yet
     int16_t raw[3];       // X, Y, Z counts
     float field_ut[3];    // X, Y, Z in microtesla
+    uint32_t samples_clean;      // from reads with the radio off
+    uint32_t samples_corrected;  // from reads with the radio on, less the offset
+    uint32_t samples_skipped;    // blocks with nothing usable, not published
+    float radio_offset_ut[3];    // what the powered radio adds to a reading
+    bool radio_offset_learned;   // true once corrected samples are allowed
 } magnetometer_data_t;
 
 // One entry of the recent-samples history.

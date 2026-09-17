@@ -1,12 +1,14 @@
 #include "magnetometer.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_phy_init.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,7 +16,16 @@
 
 #define I2C_HZ 100000
 #define I2C_TIMEOUT_MS 50
-#define SAMPLE_MS 100
+// The chip is read at 100 Hz and every ten reads become one sample; see
+// sample_task() for how.
+#define READ_MS 10
+#define READS_PER_SAMPLE 10
+// A block needs this many radio-on reads to teach or use the radio offset.
+#define MIN_ON_READS 3
+// The radio offset moves 1/16 of the way to each new observation, and is used
+// only after this many.
+#define OFFSET_GAIN (1.0f / 16.0f)
+#define OFFSET_LEARNED 16
 #define RESET_MS 20
 #define NVS_NAMESPACE "mag"
 #define NVS_KEY_OFFSET "hdg_off"
@@ -81,6 +92,31 @@ static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static magnetometer_data_t data;
 static magnetometer_sample_t history[MAGNETOMETER_HISTORY];
 static uint32_t next_seq = 1;
+
+// While the radio is powered, the magnetometer reads about 31 uT off along a
+// fixed direction in its own axes, and transmissions push it further. In modem
+// sleep the WiFi driver powers the radio up and down many times a second,
+// through these two calls. They are wrapped at link time (see CMakeLists.txt)
+// so each read can tell whether the radio stayed off, or on, for all of it.
+static atomic_uint radio_modems;    // esp_phy_modem_t bits currently powered
+static atomic_uint radio_switches;  // bumped on every power-up and power-down
+
+void __real_esp_phy_enable(esp_phy_modem_t modem);
+void __real_esp_phy_disable(esp_phy_modem_t modem);
+
+void __wrap_esp_phy_enable(esp_phy_modem_t modem)
+{
+    __real_esp_phy_enable(modem);
+    radio_modems |= modem;
+    radio_switches++;
+}
+
+void __wrap_esp_phy_disable(esp_phy_modem_t modem)
+{
+    __real_esp_phy_disable(modem);
+    radio_modems &= ~(unsigned)modem;
+    radio_switches++;
+}
 
 static esp_err_t read_regs(uint8_t reg, uint8_t *buf, size_t len)
 {
@@ -173,39 +209,115 @@ static esp_err_t detect(void)
     return ESP_ERR_NOT_FOUND;
 }
 
+// Sorts v in place; for an even n it returns the upper of the middle two.
+static int16_t median_of(int16_t *v, int n)
+{
+    for (int i = 1; i < n; i++) {
+        int16_t x = v[i];
+        int j = i;
+        for (; j > 0 && v[j - 1] > x; j--) {
+            v[j] = v[j - 1];
+        }
+        v[j] = x;
+    }
+    return v[n / 2];
+}
+
+// Each block of reads becomes one sample:
+// - reads the radio was off for are clean, and their per-axis median is the
+//   sample;
+// - with none, the median of the reads it was on for, less the radio offset,
+//   once that offset has been learned from blocks holding both kinds;
+// - reads during which it switched are dropped, and so is a block with nothing
+//   usable, rather than publishing a reading that is tens of uT out.
+// For the IST8310 the measurement runs from the trigger to the read. The QMC
+// chips measure on their own clock, so a read may carry a measurement from
+// slightly before the window it is judged by.
 static void sample_task(void *arg)
 {
     bool failing = false;
+    int16_t off[3][READS_PER_SAMPLE], on[3][READS_PER_SAMPLE];  // per axis
+    int n_off = 0, n_on = 0, reads = 0;
+    float offset[3] = {0};  // radio on minus radio off, in counts
+    uint32_t offset_seen = 0;
+    unsigned switches_at_start = radio_switches, modems_at_start = radio_modems;
     TickType_t wake = xTaskGetTickCount();
     for (;;) {
-        xTaskDelayUntil(&wake, pdMS_TO_TICKS(SAMPLE_MS));
+        xTaskDelayUntil(&wake, pdMS_TO_TICKS(READ_MS));
 
         uint8_t buf[6];
         esp_err_t err = read_regs(chip->data_reg, buf, sizeof(buf));
+        bool steady = radio_switches == switches_at_start;
+        bool was_on = modems_at_start != 0;
+        switches_at_start = radio_switches;
+        modems_at_start = radio_modems;
         if (chip->trigger[0]) {
-            write_reg(chip->trigger[0], chip->trigger[1]);  // next sample, ready well before the next read
+            // Ready well within 10 ms. A read that comes early, when the tick
+            // jitters, returns the previous result; the median shrugs it off.
+            write_reg(chip->trigger[0], chip->trigger[1]);
         }
         if (err != ESP_OK) {
             if (!failing) {
                 ESP_LOGW(TAG, "read failed: %s", esp_err_to_name(err));
                 failing = true;
             }
-            continue;
+        } else {
+            if (failing) {
+                ESP_LOGI(TAG, "reading again");
+                failing = false;
+            }
+            if (steady) {
+                int16_t (*dst)[READS_PER_SAMPLE] = was_on ? on : off;
+                int k = was_on ? n_on++ : n_off++;
+                for (int i = 0; i < 3; i++) {
+                    dst[i][k] = (int16_t)(buf[2 * i] | buf[2 * i + 1] << 8);
+                }
+            }
         }
-        if (failing) {
-            ESP_LOGI(TAG, "reading again");
-            failing = false;
+        if (++reads < READS_PER_SAMPLE) {
+            continue;
         }
 
         int16_t raw[3];
-        float field_ut[3];
+        bool corrected = false, usable = true;
+        for (int i = 0; i < 3 && usable; i++) {
+            if (n_off > 0) {
+                raw[i] = median_of(off[i], n_off);
+                if (n_on >= MIN_ON_READS) {
+                    offset[i] += OFFSET_GAIN * ((float)median_of(on[i], n_on) - raw[i] - offset[i]);
+                }
+            } else if (n_on >= MIN_ON_READS && offset_seen >= OFFSET_LEARNED) {
+                raw[i] = (int16_t)lroundf(median_of(on[i], n_on) - offset[i]);
+                corrected = true;
+            } else {
+                usable = false;
+            }
+        }
+        if (n_off > 0 && n_on >= MIN_ON_READS) {
+            offset_seen++;
+        }
+        reads = n_off = n_on = 0;
+
+        float field_ut[3], offset_ut[3];
         for (int i = 0; i < 3; i++) {
-            raw[i] = (int16_t)(buf[2 * i] | buf[2 * i + 1] << 8);
-            field_ut[i] = raw[i] * chip->ut_per_count;
+            field_ut[i] = usable ? raw[i] * chip->ut_per_count : 0.0f;
+            offset_ut[i] = offset[i] * chip->ut_per_count;
         }
         int64_t now = esp_timer_get_time();
 
         taskENTER_CRITICAL(&lock);
+        memcpy(data.radio_offset_ut, offset_ut, sizeof(offset_ut));
+        data.radio_offset_learned = offset_seen >= OFFSET_LEARNED;
+        if (!usable) {
+            data.samples_skipped++;
+            taskEXIT_CRITICAL(&lock);
+            continue;
+        }
+        if (corrected) {
+            data.samples_corrected++;
+        } else {
+            data.samples_clean++;
+        }
         memcpy(data.raw, raw, sizeof(raw));
         memcpy(data.field_ut, field_ut, sizeof(field_ut));
         data.updated_us = now;
@@ -266,7 +378,8 @@ esp_err_t magnetometer_start(void)
         goto fail;
     }
     load_heading_offset();
-    ESP_LOGI(TAG, "%s at 0x%02x, sampling every %d ms", chip->name, chip_addr, SAMPLE_MS);
+    ESP_LOGI(TAG, "%s at 0x%02x, reading every %d ms, median of %d per sample", chip->name, chip_addr, READ_MS,
+             READS_PER_SAMPLE);
     return ESP_OK;
 
 fail:
