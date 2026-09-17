@@ -104,6 +104,18 @@
   .compass-view .note { margin: 0; min-height: 1.4em; font-size: 15px; text-align: center; }
   .compass-view .note.off { color: var(--accent); font-weight: 600; }
   .fixinfo { width: 100%; max-width: 340px; }
+  /* The WiFi tab's lists: saved networks with a Forget each, and what a scan found. */
+  .nets { margin: 4px 0 8px; padding: 0; list-style: none; }
+  .nets > li { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); }
+  .nets .name { flex: 1; overflow-wrap: anywhere; }
+  .nets .tag { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .nets .tag.ok { color: var(--ok); font-weight: 600; }
+  .nets button { padding: 5px 12px; border-radius: 8px; font: inherit; cursor: pointer; }
+  .nets button:disabled { opacity: .5; cursor: default; }
+  /* A found network is one big button that fills in the name. */
+  .nets button.pick { flex: 1; display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+                      border: 0; background: none; color: var(--fg); text-align: left; }
+  .nets button.pick:hover { background: var(--bg); }
   .bar { height: 8px; margin: 6px 0; overflow: hidden; background: var(--line); border-radius: 4px; }
   .bar > div { width: 0; height: 100%; background: var(--accent); transition: width .3s; }
   /* Wide screens: Position and Magnetometer side by side, equally tall. */
@@ -227,7 +239,12 @@
       </table>
     </section>
     <section>
-      <h2>Join a network</h2>
+      <h2>Saved networks</h2>
+      <ul class="nets" id="w-saved"><li class="note">Loading…</li></ul>
+      <p class="note" id="wifi-note"></p>
+    </section>
+    <section>
+      <h2>Add a network</h2>
       <form id="wifi-form">
         <label for="ssid">Network name</label>
         <input id="ssid" name="ssid" required maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false">
@@ -235,11 +252,11 @@
         <input id="password" name="password" type="password" minlength="8" maxlength="63"
                autocomplete="new-password" placeholder="Leave empty for an open network">
         <div class="buttons">
-          <button class="primary" type="submit">Save and restart</button>
-          <button class="secondary" type="button" id="forget" hidden>Forget this network</button>
+          <button class="primary" type="submit">Save</button>
+          <button class="secondary" type="button" id="w-scan">Scan</button>
         </div>
       </form>
-      <p class="note" id="wifi-note"></p>
+      <ul class="nets" id="w-found" hidden></ul>
       <p class="status" id="msg" role="status"></p>
     </section>
     <section>
@@ -327,6 +344,7 @@ function selectTab(name) {
   $('panel-gnss').hidden = name !== 'gnss';
   $('panel-wifi').hidden = name !== 'wifi';
   history.replaceState(null, '', name === 'compass' ? location.pathname : '#' + name);
+  if (name === 'wifi') loadSaved();
   if (view.cal && view.cal.state === 'running') animate(); else draw();
 }
 for (const b of document.querySelectorAll('[role=tab]')) {
@@ -438,7 +456,7 @@ function renderMag(m) {
 }
 
 function renderWifi(w) {
-  const source = w.sta_saved ? 'set here' : 'built in';
+  const source = w.sta_saved ? 'saved' : 'built in';
   $('w-sta').textContent = !w.sta_configured ? 'None configured'
     : w.sta_connected ? `Connected to "${w.sta_ssid}" (${source}) · ${w.rssi} dBm`
     : `Connecting to "${w.sta_ssid}" (${source})…`;
@@ -446,16 +464,132 @@ function renderWifi(w) {
   $('w-ap').textContent = w.ap ? `On · "${w.ap_ssid}", open · 192.168.4.1` : 'Off';
   $('w-host').textContent = w.hostname;
 
-  $('forget').hidden = !w.sta_saved;
   // Pre-fill the network name once; never overwrite what's being typed.
   const ssid = $('ssid');
   if (!ssid.dataset.filled && w.sta_ssid && !ssid.value && document.activeElement !== ssid) {
     ssid.value = w.sta_ssid;
     ssid.dataset.filled = '1';
   }
-  $('wifi-note').textContent = `Saving restarts the device. If it can't connect within ${w.fallback_s} s, ` +
-    `the open access point "${w.ap_ssid}" comes up.`;
+  $('wifi-note').textContent = `It joins the strongest of these in range, and moves on to the next if one fails. ` +
+    `If it can't join any within ${w.fallback_s} s, the open access point "${w.ap_ssid}" comes up.`;
+  wifiView.connected = w.sta_connected ? w.sta_ssid : null;
+  renderSaved();
 }
+
+// ---- Saved networks and scanning ----
+// The list comes from /api/wifi, names only: the device never sends a password
+// back. Which one is connected comes from the status poll, once a second.
+const wifiView = {saved: null, builtin: null, max: 5, connected: null, drawn: ''};
+
+async function loadSaved() {
+  try {
+    const r = await fetch('/api/wifi', {cache: 'no-store', signal: AbortSignal.timeout(4000)});
+    const j = await r.json();
+    wifiView.saved = j.saved.map(n => n.ssid);
+    wifiView.builtin = j.builtin;
+    wifiView.max = j.max;
+    renderSaved();
+  } catch {
+    // the status poll already says the device is quiet
+  }
+}
+
+function netItem(name, tags) {
+  const li = document.createElement('li');
+  const span = document.createElement('span');
+  span.className = 'name';
+  span.textContent = name;
+  li.append(span);
+  for (const [text, cls] of tags) {
+    const tag = document.createElement('span');
+    tag.className = 'tag' + (cls ? ' ' + cls : '');
+    tag.textContent = text;
+    li.append(tag);
+  }
+  return li;
+}
+
+function renderSaved() {
+  if (!wifiView.saved) return;
+  // Rebuilt only when something changed, or a poll would eat a click.
+  const key = JSON.stringify([wifiView.saved, wifiView.builtin, wifiView.connected]);
+  if (key === wifiView.drawn) return;
+  wifiView.drawn = key;
+
+  const list = $('w-saved');
+  list.replaceChildren();
+  for (const name of wifiView.saved) {
+    const li = netItem(name, name === wifiView.connected ? [['connected', 'ok']] : []);
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.className = 'secondary';
+    forget.textContent = 'Forget';
+    forget.onclick = () => forgetNetwork(name);
+    li.append(forget);
+    list.append(li);
+  }
+  if (wifiView.builtin && !wifiView.saved.includes(wifiView.builtin)) {
+    const tags = [['built in', '']];
+    if (wifiView.builtin === wifiView.connected) tags.unshift(['connected', 'ok']);
+    list.append(netItem(wifiView.builtin, tags));
+  }
+  if (!list.children.length) {
+    const li = document.createElement('li');
+    li.className = 'note';
+    li.textContent = 'None yet. Add one below.';
+    list.append(li);
+  }
+}
+
+async function forgetNetwork(name) {
+  const here = name === wifiView.connected;
+  if (!confirm(here
+      ? `Forget "${name}"? The device is connected through it, so it leaves it now and this page stops ` +
+        `responding until it joins another network or brings up its access point.`
+      : `Forget "${name}"?`)) return;
+  if (await post('/api/wifi/forget', new URLSearchParams({ssid: name}), `Forgot "${name}".`)) {
+    loadSaved();
+  }
+}
+
+async function scanNetworks() {
+  const button = $('w-scan'), list = $('w-found');
+  button.disabled = true;
+  status($('msg'), 'Scanning…', '');
+  try {
+    const r = await fetch('/api/wifi/scan', {cache: 'no-store', signal: AbortSignal.timeout(15000)});
+    const j = (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
+    if (!j || !j.networks) throw new Error((j && j.error) || `the device answered ${r.status}`);
+    list.replaceChildren();
+    for (const n of j.networks) {
+      const li = document.createElement('li');
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'pick';
+      const name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = n.ssid;
+      const tag = document.createElement('span');
+      tag.className = 'tag';
+      tag.textContent = [n.known ? 'saved' : '', n.secure ? 'secured' : 'open', `${n.rssi} dBm`]
+        .filter(Boolean).join(' · ');
+      pick.append(name, tag);
+      pick.onclick = () => {
+        $('ssid').value = n.ssid;
+        $('password').value = '';
+        $('password').focus();
+      };
+      li.append(pick);
+      list.append(li);
+    }
+    list.hidden = false;
+    status($('msg'), j.networks.length ? 'Pick one to fill in its name.' : 'No networks found.', '');
+  } catch (err) {
+    status($('msg'), 'Scan failed: ' + (err.name === 'TimeoutError' ? "the device didn't answer" : err.message), 'bad');
+  }
+  button.disabled = false;
+}
+$('w-scan').onclick = scanNetworks;
 
 // Takes the whole status: it needs the hostname from the WiFi section as well.
 function renderBle(ble, wifi) {
@@ -508,12 +642,14 @@ async function post(url, body, done) {
     const j = (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
     if (!j || !j.ok) throw new Error((j && j.error) || `the device answered ${r.status}`);
     status(msg, done, 'ok');
+    return true;
   } catch (err) {
     status(msg, 'Failed: ' + err.message, 'bad');
+    return false;
   }
 }
 
-$('wifi-form').onsubmit = e => {
+$('wifi-form').onsubmit = async e => {
   e.preventDefault();
   const ssid = $('ssid').value;
   // The name is pre-filled, so an untouched form would otherwise save the current
@@ -522,13 +658,15 @@ $('wifi-form').onsubmit = e => {
       !confirm(`Save "${ssid}" with no password? Only do this if the network really is open.`)) {
     return;
   }
-  post('/api/wifi', new URLSearchParams(new FormData(e.target)),
-       `Saved. Restarting to join "${ssid}"; once it's on, open http://${hostname || location.host}/ from that network.`);
-};
-
-$('forget').onclick = () => {
-  if (!confirm('Forget this network? The device restarts and uses the built-in network, or its access point.')) return;
-  post('/api/wifi/forget', null, 'Forgotten. Restarting…');
+  // No restart: a device already on a network stays on it, and uses this one
+  // whenever that one is out of reach.
+  const done = wifiView.connected && wifiView.connected !== ssid
+    ? `Saved "${ssid}". It stays on "${wifiView.connected}" for now, and joins "${ssid}" whenever that is out of reach.`
+    : `Saved "${ssid}". If it moves to that network, open http://${hostname || location.host}/ from there.`;
+  if (await post('/api/wifi', new URLSearchParams(new FormData(e.target)), done)) {
+    $('password').value = '';
+    loadSaved();
+  }
 };
 
 // This page is reachable only while WiFi has the radio, so Bluetooth is always

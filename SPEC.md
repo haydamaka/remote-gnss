@@ -48,6 +48,26 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
 - **mDNS.** The device answers as `gnss-haydamaka.local` and advertises the web
   server as `_http._tcp`. (`gnss.haydamaka.local` was asked for; see Open
   questions.)
+- On the WiFi page, add the possibility to save multiple WiFi networks. Also add
+  a WiFi network scan.
+  - Up to five networks are saved in NVS, newest first, names and passwords
+    together. The built-in one is still there as well, and cannot be forgotten.
+  - The station scans and joins the strongest network it knows that is in
+    range, and moves straight on to the next when one fails; networks the scan
+    did not see are tried last, in case they are hidden. With a single known
+    network it skips the scan and joins it directly, as before. The 30 s access
+    point fallback is unchanged.
+  - Adding or forgetting a network takes effect without a restart: an access
+    point with nothing to join starts joining, a device waiting to retry tries
+    at once, and a device on a network that was just forgotten leaves it.
+  - The page lists the saved networks with a Forget button each and marks the
+    connected one. Passwords are never sent back to the page.
+  - **Scan** lists nearby networks, one row per name, strongest first, with
+    signal, secured or open, and whether it is already known. Picking one fills
+    in the name. While the station is busy joining a network the scan is
+    refused and the page says to try again.
+  - The network saved by earlier firmware (NVS keys `ssid`/`pass`) moves into
+    the list on the first boot, so an update keeps the device on its network.
 
 ## Web interface
 
@@ -92,8 +112,10 @@ home network.
 | `POST /api/bearing` | `learning`, `applying`, `reset` or `save`, form-encoded |
 | `POST /api/heading` | `offset` in degrees, form-encoded: the correction added to the measured heading |
 | `POST /api/cal/points` | replace the buffered readings with a CSV (`x,y,z` or `seq,t_ms,x,y,z`) |
-| `POST /api/wifi` | `ssid` and `password`, form-encoded: save and restart |
-| `POST /api/wifi/forget` | drop the network set from the page and restart |
+| `GET /api/wifi` | the saved networks by name (never their passwords), how many can be saved, and the built-in one's name |
+| `POST /api/wifi` | `ssid` and `password`, form-encoded: save a network, or replace its password; no restart |
+| `POST /api/wifi/forget` | `ssid`, form-encoded: forget that network; with no body, every saved one; no restart |
+| `GET /api/wifi/scan` | nearby networks: `ssid`, `rssi`, `channel`, `secure`, `known`, strongest first; takes two or three seconds, and 503 while busy joining |
 | `POST /api/ota` | a firmware `.bin` as the body: check it, install it, restart into it |
 | `POST /api/ble` | `on` or `off` as the whole body: choose the radio for next boot and restart |
 | `POST /api/restart` | restart the device |

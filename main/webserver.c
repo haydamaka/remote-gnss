@@ -837,24 +837,89 @@ static esp_err_t wifi_post(httpd_req_t *req)
     if (err == ESP_ERR_INVALID_ARG) {
         return reply(req, HTTPD_400, "The network name must be 1-32 characters, the password empty or 8-63");
     }
+    if (err == ESP_ERR_NO_MEM) {
+        return reply(req, HTTPD_400, "Five networks are saved already; forget one first");
+    }
     if (err != ESP_OK) {
         return reply(req, HTTPD_500, "Could not save the settings");
     }
-    ESP_LOGI(TAG, "station network set to \"%s\", restarting", ssid);
-    reply(req, HTTPD_200, NULL);
-    restart_soon();
-    return ESP_OK;
+    return reply(req, HTTPD_200, NULL);
 }
 
+// With ssid, forgets that network; with no body, every saved one.
 static esp_err_t forget_post(httpd_req_t *req)
 {
-    if (wifi_forget_station() != ESP_OK) {
+    char body[128];
+    char ssid[100];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return reply(req, HTTPD_400, "Could not read the request");
+    }
+    bool one = httpd_query_key_value(body, "ssid", ssid, sizeof(ssid)) == ESP_OK;
+    if (one) {
+        url_decode(ssid);
+    }
+    esp_err_t err = wifi_forget_station(one ? ssid : NULL);
+    if (err == ESP_ERR_NOT_FOUND) {
+        return reply(req, HTTPD_400, "That network is not saved");
+    }
+    if (err != ESP_OK) {
         return reply(req, HTTPD_500, "Could not clear the settings");
     }
-    ESP_LOGI(TAG, "station network forgotten, restarting");
-    reply(req, HTTPD_200, NULL);
-    restart_soon();
-    return ESP_OK;
+    return reply(req, HTTPD_200, NULL);
+}
+
+// The saved networks by name, and the built-in one. Never a password.
+static esp_err_t wifi_get(httpd_req_t *req)
+{
+    char names[WIFI_SAVED_MAX][33];
+    size_t n = wifi_get_saved(names, WIFI_SAVED_MAX);
+    json_t j = {.buf = req_scratch, .size = sizeof(req_scratch)};
+    json_open(&j, NULL);
+    json_key(&j, "saved");
+    json_append(&j, "[");
+    for (size_t i = 0; i < n; i++) {
+        json_append(&j, i ? "," : "");
+        json_open(&j, NULL);
+        json_str(&j, "ssid", names[i]);
+        json_close(&j);
+    }
+    json_append(&j, "]");
+    json_int(&j, "max", WIFI_SAVED_MAX);
+    json_str(&j, "builtin", wifi_builtin_ssid());
+    json_close(&j);
+    return send_json(req, &j, "networks");
+}
+
+// Holds this server's only task for the two or three seconds a scan takes:
+// the price of not keeping a result buffer around for ever.
+static esp_err_t wifi_scan_get(httpd_req_t *req)
+{
+    wifi_scan_entry_t found[WIFI_SCAN_MAX];
+    size_t n;
+    esp_err_t err = wifi_scan(found, WIFI_SCAN_MAX, &n);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return reply(req, "503 Service Unavailable", "Busy joining a network; try again in a few seconds");
+    }
+    if (err != ESP_OK) {
+        return reply(req, HTTPD_500, "The scan failed");
+    }
+    json_t j = {.buf = req_scratch, .size = sizeof(req_scratch)};
+    json_open(&j, NULL);
+    json_key(&j, "networks");
+    json_append(&j, "[");
+    for (size_t i = 0; i < n; i++) {
+        json_append(&j, i ? "," : "");
+        json_open(&j, NULL);
+        json_str(&j, "ssid", found[i].ssid);
+        json_int(&j, "rssi", found[i].rssi);
+        json_int(&j, "channel", found[i].channel);
+        json_bool(&j, "secure", found[i].secure);
+        json_bool(&j, "known", found[i].known);
+        json_close(&j);
+    }
+    json_append(&j, "]");
+    json_close(&j);
+    return send_json(req, &j, "scan");
 }
 
 esp_err_t webserver_start(void)
@@ -876,8 +941,10 @@ esp_err_t webserver_start(void)
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},
         {.uri = "/api/ble", .method = HTTP_POST, .handler = ble_post},
         {.uri = "/api/restart", .method = HTTP_POST, .handler = restart_post},
+        {.uri = "/api/wifi", .method = HTTP_GET, .handler = wifi_get},
         {.uri = "/api/wifi", .method = HTTP_POST, .handler = wifi_post},
         {.uri = "/api/wifi/forget", .method = HTTP_POST, .handler = forget_post},
+        {.uri = "/api/wifi/scan", .method = HTTP_GET, .handler = wifi_scan_get},
     };
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
