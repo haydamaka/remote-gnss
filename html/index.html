@@ -48,6 +48,8 @@
   th { width: 38%; color: var(--muted); font-weight: normal; }
   td { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .note { margin: 8px 0; color: var(--muted); font-size: 13px; }
+  .check { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: 15px; }
+  .check input { margin: 0; }
   label { display: block; margin: 12px 0 4px; color: var(--muted); }
   input {
     width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
@@ -177,6 +179,9 @@
         <tr><th>Course</th><td id="course">—</td></tr>
         <tr><th>Time</th><td id="utc">—</td></tr>
       </table>
+      <label class="check"><input type="checkbox" id="no-spoofed"> Don't send positions that look spoofed</label>
+      <p class="note" id="no-spoofed-note">While the signals look faked, and for a minute after, TCP and Bluetooth
+        clients get &ldquo;no fix&rdquo; instead of the position and time.</p>
     </section>
     <section>
       <h2>Magnetometer</h2>
@@ -435,7 +440,29 @@ function renderGnss(g) {
   $('speed').textContent = num(g.speed_kmh, 1, ' km/h');
   $('course').textContent = num(g.course, 1, '°');
   $('utc').textContent = g.utc ? g.utc + ' UTC' : DASH;
+
+  // A status reply sent before the box was clicked would put it back.
+  if (Date.now() > view.noSpoofedHeld) $('no-spoofed').checked = g.withhold_spoofed;
+  $('no-spoofed-note').textContent = g.withholding
+    ? 'Withholding the position now: TCP and Bluetooth clients are getting "no fix".'
+    : 'While the signals look faked, and for a minute after, TCP and Bluetooth clients get "no fix" instead of the position and time.';
 }
+
+$('no-spoofed').onchange = async () => {
+  const box = $('no-spoofed');
+  view.noSpoofedHeld = Date.now() + 3000;
+  box.disabled = true;
+  try {
+    const r = await fetch('/api/gnss', {method: 'POST', body: `withhold_spoofed=${box.checked ? 1 : 0}`,
+                                        signal: AbortSignal.timeout(5000)});
+    if (!r.ok) throw new Error();
+  } catch {
+    box.checked = !box.checked;
+    $('no-spoofed-note').textContent = "Couldn't save that; the device didn't take it.";
+  } finally {
+    box.disabled = false;
+  }
+};
 
 function renderMag(m) {
   const el = $('mag-status');
@@ -699,7 +726,7 @@ document.getElementById('ble-off').addEventListener('click', async () => {
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
-const view = {cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
+const view = {noSpoofedHeld: 0, cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
               fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0, autoAdjust: false,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];

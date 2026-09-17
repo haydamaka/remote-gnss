@@ -33,9 +33,17 @@ typedef struct {
     int64_t spoof_us;     // esp_timer time of the last NAV-STATUS reply, 0 if none
     bool implausible;     // our own checks say the fix cannot be true
     char implausible_why[64];
+    bool withholding;     // TCP and BLE are being sent "no fix" instead of this
 } gnss_data_t;
 
 // Starts reading NMEA from the receiver on UART1, per menuconfig "Remote GNSS → GNSS".
 esp_err_t gnss_start(void);
 
 void gnss_get(gnss_data_t *out);
+
+// Whether a fix that looks spoofed is kept from the NMEA outputs (TCP, BLE).
+// While it is, and for a minute after the last sign of spoofing, they get
+// "no fix" sentences instead of the position and time. On unless turned off;
+// kept in NVS.
+bool gnss_withhold_spoofed(void);
+esp_err_t gnss_set_withhold_spoofed(bool on);

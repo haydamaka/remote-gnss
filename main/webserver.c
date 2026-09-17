@@ -261,6 +261,8 @@ static esp_err_t status_get(httpd_req_t *req)
     json_int(&j, "spoof", g.spoof);
     json_bool(&j, "implausible", g.implausible);
     json_str(&j, "implausible_why", g.implausible_why[0] ? g.implausible_why : NULL);
+    json_bool(&j, "withhold_spoofed", gnss_withhold_spoofed());
+    json_bool(&j, "withholding", g.withholding);
     json_close(&j);
 
     float field[3];
@@ -724,6 +726,21 @@ static esp_err_t heading_post(httpd_req_t *req)
     return reply(req, HTTPD_200, NULL);
 }
 
+static esp_err_t gnss_post(httpd_req_t *req)
+{
+    char body[64], value[8];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return reply(req, HTTPD_400, "The request was too long");
+    }
+    if (httpd_query_key_value(body, "withhold_spoofed", value, sizeof(value)) != ESP_OK) {
+        return reply(req, HTTPD_400, "Nothing to do");
+    }
+    if (gnss_set_withhold_spoofed(value[0] == '1') != ESP_OK) {
+        return reply(req, HTTPD_500, "Couldn't save the setting");
+    }
+    return reply(req, HTTPD_200, NULL);
+}
+
 static esp_err_t cal_stop_post(httpd_req_t *req)
 {
     mag_cal_stop();
@@ -936,6 +953,7 @@ esp_err_t webserver_start(void)
         {.uri = "/api/cal/accept", .method = HTTP_POST, .handler = cal_accept_post},
         {.uri = "/api/cal/points", .method = HTTP_POST, .handler = cal_points_post},
         {.uri = "/api/heading", .method = HTTP_POST, .handler = heading_post},
+        {.uri = "/api/gnss", .method = HTTP_POST, .handler = gnss_post},
         {.uri = "/api/bearing", .method = HTTP_GET, .handler = bearing_get_handler},
         {.uri = "/api/bearing/log", .method = HTTP_GET, .handler = bearing_log_get},
         {.uri = "/api/bearing", .method = HTTP_POST, .handler = bearing_post},

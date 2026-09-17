@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "minmea.h"
 #include "nmea_hub.h"
+#include "nvs.h"
 
 #define GNSS_UART UART_NUM_1
 #define UART_RX_BUF_SIZE 2048
@@ -25,6 +26,11 @@
 #define IMPLAUSIBLE_SPEED_KMH 900.0f  // faster than an airliner: the fix jumped
 #define IMPLAUSIBLE_MIN_KM 0.5        // below this, a "jump" is just multipath
 #define STALE_US (10 * 1000 * 1000)   // a warning older than this says nothing
+// A spoofer's fix can look plausible for a moment, and the checks only run once
+// per solution, so withholding outlasts the last sign by this much.
+#define WITHHOLD_HOLD_US (60 * 1000 * 1000)
+#define NVS_NAMESPACE "gnss"
+#define NVS_KEY_WITHHOLD "no_spoofed"
 
 static const char *TAG = "gnss";
 
@@ -38,6 +44,8 @@ static const int BAUDS[] = {CONFIG_RGNSS_GNSS_BAUD, 38400, 115200, 9600, 57600, 
 // everyone else copies it out under the lock.
 static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static gnss_data_t data;
+
+static volatile bool withhold_spoofed = true;
 
 // NMEA ddmm.mmmm to signed decimal degrees. Done in double: float would round
 // away the last metre or so.
@@ -216,9 +224,12 @@ static void check_plausible(double lat, double lon, const char *utc)
         }
     }
 
+    // Without network time - no WiFi, or not synced yet - the year is what is
+    // left. A spoofer that sets the date years ahead fails this; one that keeps
+    // it close gets past, and only network time catches that.
     int year = atoi(utc);  // "YYYY-..."
     int built = atoi(__DATE__ + 7);
-    if (!why[0] && year && (year < built || year > built + 5)) {
+    if (!why[0] && year && (year < built || year > built + 1)) {
         snprintf(why, sizeof(why), "the receiver says it is %d, this firmware is from %d", year, built);
     }
     if (!why[0] && last_us && isfinite(lat) && isfinite(lon)) {
@@ -278,6 +289,47 @@ static void handle_sentence(const char *line)
     }
 }
 
+// A sign of spoofing from either detector. Reader task only.
+static bool looks_spoofed(int64_t now)
+{
+    bool receiver = data.spoof_us && now - data.spoof_us <= STALE_US && data.spoof >= GNSS_SPOOF_INDICATED;
+    return receiver || data.implausible;
+}
+
+// What goes out in place of a sentence while a fix is withheld. The ones that
+// say where or when become the receiver's own "no fix" form, so a client shows
+// no fix rather than timing out on missing sentences; the satellites in view
+// and text messages say nothing about either and pass; the rest, $PUBX
+// included, are dropped.
+static void publish_withheld(const char *line, size_t len)
+{
+    static const struct {
+        const char *type, *empty;
+    } NO_FIX[] = {
+        {"GGA", ",,,,,,0,00,99.99,,,,,,"},
+        {"RMC", ",,V,,,,,,,,,,N,V"},
+        {"GLL", ",,,,,,V,N"},
+        {"VTG", ",,,,,,,,,N"},
+    };
+    if (len >= 7 && line[1] == 'G' && (strncmp(line + 3, "GSV,", 4) == 0 || strncmp(line + 3, "TXT,", 4) == 0)) {
+        nmea_hub_publish(line, len);
+        return;
+    }
+    for (size_t i = 0; i < sizeof(NO_FIX) / sizeof(NO_FIX[0]); i++) {
+        if (line[1] == 'G' && strncmp(line + 3, NO_FIX[i].type, 3) == 0 && line[6] == ',') {
+            char out[48];
+            int n = snprintf(out, sizeof(out), "$%c%c%s%s", line[1], line[2], NO_FIX[i].type, NO_FIX[i].empty);
+            uint8_t sum = 0;
+            for (int k = 1; k < n; k++) {
+                sum ^= (uint8_t)out[k];
+            }
+            n += snprintf(out + n, sizeof(out) - (size_t)n, "*%02X", sum);
+            nmea_hub_publish(out, (size_t)n);
+            return;
+        }
+    }
+}
+
 // Splits the byte stream into lines. The receiver also sends binary UBX
 // frames; any garbage they leave in a line fails minmea's checksum.
 static void reader_task(void *arg)
@@ -293,6 +345,7 @@ static void reader_task(void *arg)
     int64_t baud_since = esp_timer_get_time();
     int64_t last_good = baud_since;
     bool locked = false;
+    int64_t suspect_us = 0;  // when a sign of spoofing was last seen
 
     for (;;) {
         // Hunt for the rate until something checksums, then stay there.
@@ -360,18 +413,38 @@ static void reader_task(void *arg)
                     len--;
                 }
                 line[len] = '\0';
-                // Out to the network and BLE before parsing: subscribers want
-                // the sentence types minmea has no struct for (GSV, GLL, ...)
-                // as well. minmea_check screens out the wreckage the binary
-                // UBX frames leave behind.
+                // Parsed first, so the plausibility checks have seen this
+                // solution before deciding whether it may go out.
+                handle_sentence(line);
+
+                int64_t now = esp_timer_get_time();
+                if (looks_spoofed(now)) {
+                    suspect_us = now;
+                }
+                bool withhold = withhold_spoofed && suspect_us && now - suspect_us < WITHHOLD_HOLD_US;
+                if (withhold != data.withholding) {
+                    ESP_LOGW(TAG, "%s", withhold ? "the fix looks spoofed; TCP and BLE get no fix until it stops"
+                                                 : "no sign of spoofing for a minute; sending the fix again");
+                    taskENTER_CRITICAL(&lock);
+                    data.withholding = withhold;
+                    taskEXIT_CRITICAL(&lock);
+                }
+
+                // Out to the network and BLE, all of them: subscribers want the
+                // sentence types minmea has no struct for (GSV, GLL, ...) as
+                // well. minmea_check screens out the wreckage the binary UBX
+                // frames leave behind.
                 // The shortest real sentence is "$" + a five-character address
                 // + ",". Without the length test a lone 0x24 byte inside a
                 // binary UBX frame, followed by a newline, passes minmea_check
                 // and goes out as a stub sentence.
                 if (len >= 7 && line[0] == '$' && minmea_check(line, false)) {
-                    nmea_hub_publish(line, len);
+                    if (withhold) {
+                        publish_withheld(line, len);
+                    } else {
+                        nmea_hub_publish(line, len);
+                    }
                 }
-                handle_sentence(line);
                 len = 0;
             } else if (len < sizeof(line) - 1) {
                 line[len++] = c;
@@ -382,8 +455,37 @@ static void reader_task(void *arg)
     }
 }
 
+bool gnss_withhold_spoofed(void)
+{
+    return withhold_spoofed;
+}
+
+esp_err_t gnss_set_withhold_spoofed(bool on)
+{
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "open NVS");
+    esp_err_t err = nvs_set_u8(nvs, NVS_KEY_WITHHOLD, on);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    ESP_RETURN_ON_ERROR(err, TAG, "save the spoofing setting");
+    withhold_spoofed = on;
+    ESP_LOGI(TAG, "a fix that looks spoofed is %s", on ? "withheld from TCP and BLE" : "sent as it is");
+    return ESP_OK;
+}
+
 esp_err_t gnss_start(void)
 {
+    nvs_handle_t nvs;
+    uint8_t on;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        if (nvs_get_u8(nvs, NVS_KEY_WITHHOLD, &on) == ESP_OK) {
+            withhold_spoofed = on != 0;
+        }
+        nvs_close(nvs);
+    }
+
     data.latitude = NAN;
     data.longitude = NAN;
     data.altitude_m = NAN;

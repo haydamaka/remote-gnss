@@ -111,6 +111,7 @@ home network.
 | `GET /api/bearing/log` | the drive as CSV, a row a minute |
 | `POST /api/bearing` | `learning`, `applying`, `reset` or `save`, form-encoded |
 | `POST /api/heading` | `offset` in degrees, form-encoded: the correction added to the measured heading |
+| `POST /api/gnss` | `withhold_spoofed=0\|1`, form-encoded: whether a fix that looks spoofed is kept from TCP and Bluetooth; `/api/status` reports it under `gnss`, with `withholding` when it is happening |
 | `POST /api/cal/points` | replace the buffered readings with a CSV (`x,y,z` or `seq,t_ms,x,y,z`) |
 | `GET /api/wifi` | the saved networks by name (never their passwords), how many can be saved, and the built-in one's name |
 | `POST /api/wifi` | `ssid` and `password`, form-encoded: save a network, or replace its password; no restart |
@@ -154,6 +155,16 @@ trusted. Two independent sources, because either alone can be fooled:
   - the receiver's year against the firmware's build year, for when there is no
     network;
   - a jump in position faster than 900 km/h.
+- The receiver's year against the build year allows one year ahead, not five: a
+  spoofer on 2026-09-17 was sending 2028-03-10 and passed the old limit. It also
+  sent 2026-01-01 at other times, which only network time catches - about
+  45 s after joining WiFi, once SNTP has answered.
+- **Don't send positions that look spoofed** — a checkbox under Position on the
+  GNSS/Magnetometer tab, on by default, kept in NVS. While either detector
+  says the fix looks faked, and for a minute after the last sign, TCP and
+  Bluetooth clients get the receiver's "no fix" form of GGA, RMC, GLL and VTG,
+  with no time or position in them; GSV and TXT pass, everything else is held
+  back. A phone using the device as its location then falls back to its own.
 
 ## Compass bearing
 
