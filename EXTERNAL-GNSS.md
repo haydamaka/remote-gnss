@@ -183,10 +183,10 @@ necessity.
 
 | Purpose                  | Tool                                                      |
 |--------------------------|-----------------------------------------------------------|
-| Is anything coming out?  | `nc gnss-haydamaka.local 10110`                           |
-| Feed the whole desktop   | `gpsd -N -n tcp://gnss-haydamaka.local:10110`             |
+| Is anything coming out?  | `nc haydamaka-puck-gnss.local 10110`                           |
+| Feed the whole desktop   | `gpsd -N -n tcp://haydamaka-puck-gnss.local:10110`             |
 | Look at the fix          | `cgps`, `gpsmon`, `xgps` (once gpsd has it)               |
-| Fake a serial GPS        | `socat pty,link=/dev/ttyGNSS,raw tcp:gnss-haydamaka.local:10110` |
+| Fake a serial GPS        | `socat pty,link=/dev/ttyGNSS,raw tcp:haydamaka-puck-gnss.local:10110` |
 | Log / replay             | `gpspipe -r`, or RTKLIB's `str2str`                       |
 | Maps, QGIS, Chromium     | via gpsd → geoclue                                        |
 | BLE → virtual serial     | `pip install ble-serial`; `ble-serial -d <MAC>` gives a `/dev/pts/N` that gpsd or socat can then read |
@@ -212,7 +212,7 @@ adapter (`hci0`).
 `/etc/default/gpsd` and holds port 2947, which collides with running
 `gpsd -N -n tcp://…` by hand. Manual runs are what testing wants. For a
 permanent desktop setup later, put the device back in `/etc/default/gpsd`
-(`DEVICES="tcp://gnss-haydamaka.local:10110"`, `GPSD_OPTIONS="-n"`) and
+(`DEVICES="tcp://haydamaka-puck-gnss.local:10110"`, `GPSD_OPTIONS="-n"`) and
 re-enable the socket.
 
 **Verified end to end on 2026-09-12** against a synthetic 1 Hz NMEA server on
@@ -250,7 +250,7 @@ Two Android connection topologies:
   WiFi network with no internet, but this is worth checking on the actual
   phone.
 - **Both on the same WiFi network** — better when the phone needs its normal
-  network; use `gnss-haydamaka.local` or the IP.
+  network; use `haydamaka-puck-gnss.local` or the IP.
 
 ### 4.3 What I would write
 

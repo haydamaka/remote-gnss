@@ -7,7 +7,7 @@
 
 // Serves the NMEA stream to TCP clients on menuconfig "Remote GNSS → NMEA
 // output → TCP port" (10110, the registered NMEA-0183 port). gpsd takes it
-// directly: gpsd -N -n tcp://gnss-haydamaka.local:10110
+// directly: gpsd -N -n tcp://haydamaka-puck-gnss.local:10110
 esp_err_t nmea_tcp_start(void);
 
 typedef struct {

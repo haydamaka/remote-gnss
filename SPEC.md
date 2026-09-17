@@ -45,7 +45,7 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
   password) comes up when there are no credentials, or when the station has
   been without a connection for 30 s. It goes down again once the station
   connects.
-- **mDNS.** The device answers as `gnss-haydamaka.local` and advertises the web
+- **mDNS.** The device answers as `haydamaka-puck-gnss.local` and advertises the web
   server as `_http._tcp`. (`gnss.haydamaka.local` was asked for; see Open
   questions.)
 - On the WiFi page, add the possibility to save multiple WiFi networks. Also add
@@ -274,8 +274,9 @@ page with text readings.
 - `gnss.haydamaka.local`: checked on hardware 2026-09-11. ESP-IDF's mDNS
   component (espressif/mdns 1.12.0) answers it with the labels
   `gnss.haydamaka` + `local`, one label containing a literal dot, which
-  resolvers asking for `gnss` + `haydamaka` + `local` reject. Using
-  `gnss-haydamaka.local` for now; the two-label name would need a patched
-  mDNS component.
+  resolvers asking for `gnss` + `haydamaka` + `local` reject. Used
+  `gnss-haydamaka.local` instead; the two-label name would need a patched
+  mDNS component. Renamed to `haydamaka-puck-gnss` on 2026-09-17, for mDNS and
+  Bluetooth alike, with the page title **Haydamaka Puck GNSS**.
 - The orientation of the magnetometer's axes relative to the module isn't
   established yet. The horizontal plane looks like XY, from a flat spin.

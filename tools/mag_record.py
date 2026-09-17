@@ -110,7 +110,7 @@ def status_samples(host, stats):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('--host', default='gnss-haydamaka.local', help='device address (default: %(default)s)')
+    parser.add_argument('--host', default='haydamaka-puck-gnss.local', help='device address (default: %(default)s)')
     parser.add_argument('--out', help='CSV file (default: tools/recordings/mag-<time>.csv in the repo)')
     parser.add_argument('--seconds', type=float, help='stop after this long')
     args = parser.parse_args()

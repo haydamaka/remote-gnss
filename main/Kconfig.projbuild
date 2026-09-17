@@ -30,7 +30,7 @@ menu "Remote GNSS"
 
     config RGNSS_HOSTNAME
         string "mDNS hostname (without .local)"
-        default "gnss-haydamaka"
+        default "haydamaka-puck-gnss"
         help
             A single label: ESP-IDF's mDNS responder writes a dotted name such as
             "gnss.haydamaka" into its replies as one label, which resolvers reject.

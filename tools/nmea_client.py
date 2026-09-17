@@ -6,7 +6,7 @@ soak test for the TCP server and the BLE link: it reports the sentence rate,
 the fix, checksum errors, gaps in the stream and reconnects, and exits non-zero
 if anything went wrong.
 
-    tools/nmea_client.py                              gnss-haydamaka.local:10110
+    tools/nmea_client.py                              haydamaka-puck-gnss.local:10110
     tools/nmea_client.py --host 192.168.4.1           the soft access point
     tools/nmea_client.py --serial /dev/pts/5          BLE, behind ble-serial
     tools/nmea_client.py --duration 3600 --quiet      an hour, summary only
@@ -156,7 +156,7 @@ def read_source(source, st: Stats, args, deadline):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--host", default="gnss-haydamaka.local")
+    ap.add_argument("--host", default="haydamaka-puck-gnss.local")
     ap.add_argument("--port", type=int, default=10110)
     ap.add_argument("--serial", metavar="DEV", help="read a serial port or pty instead of TCP")
     ap.add_argument("--duration", type=float, default=30, help="seconds to run, 0 for no limit (default 30)")

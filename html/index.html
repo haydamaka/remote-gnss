@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Haydamaka-GNSS</title>
+<title>Haydamaka Puck GNSS</title>
 <style>
   :root {
     --bg: #f4f4f1; --card: #fff; --fg: #1c1c1a; --muted: #6a6a64; --line: #e3e3dd;
@@ -130,7 +130,7 @@
 </head>
 <body>
 <header>
-  <h1>Haydamaka-GNSS</h1>
+  <h1>Haydamaka Puck GNSS</h1>
   <nav role="tablist">
     <button role="tab" data-tab="compass" aria-selected="true">Compass</button>
     <button role="tab" data-tab="gnss" aria-selected="false">GNSS/Magnetometer</button>
@@ -284,7 +284,7 @@
       <h3>What happens when you switch</h3>
       <ol class="note">
         <li>WiFi stops and <strong>this page stops responding</strong>. That is expected.</li>
-        <li>The device advertises as <code class="ble-name">gnss-haydamaka</code> and serves
+        <li>The device advertises as <code class="ble-name">haydamaka-puck-gnss</code> and serves
             the same NMEA sentences over BLE.</li>
         <li>The choice is remembered, so it starts on Bluetooth from now on.</li>
         <li>Once nothing has been connected over Bluetooth for
@@ -315,7 +315,7 @@
         <li>Settings &rarr; System &rarr; Developer options &rarr; <em>Select mock location
             app</em> &rarr; choose the bridge app.</li>
         <li>In the app pick a <em>Bluetooth LE</em> connection and choose
-            <code class="ble-name">gnss-haydamaka</code>. Do not pair it in Android's
+            <code class="ble-name">haydamaka-puck-gnss</code>. Do not pair it in Android's
             Bluetooth settings first &mdash; BLE devices are connected from inside the app.</li>
         <li>Turn its mock location on. Every other app now follows this device.</li>
       </ol>
@@ -323,12 +323,12 @@
       <ol class="note">
         <li>Put the phone on the same network as this device, or join its access point.</li>
         <li>In the bridge app pick a <em>TCP/IP</em> connection and give it
-            <code class="ble-host">gnss-haydamaka.local</code> port <code>10110</code>. Use
+            <code class="ble-host">haydamaka-puck-gnss.local</code> port <code>10110</code>. Use
             the address shown above if the name does not resolve.</li>
         <li>Set the mock location app as above.</li>
       </ol>
       <p class="note">
-        A PC needs no app: <code>gpsd -N -n tcp://<span class="ble-host">gnss-haydamaka.local</span>:10110</code>
+        A PC needs no app: <code>gpsd -N -n tcp://<span class="ble-host">haydamaka-puck-gnss.local</span>:10110</code>
         feeds the whole desktop, and <code>ble-serial</code> does the same over BLE.
       </p>
     </section>

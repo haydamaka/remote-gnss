@@ -36,6 +36,6 @@ commit it, and never print its contents.
 ## Updating over WiFi
 
 The board need not be on USB: `idf.py build` then
-`curl -X POST --data-binary @build/remote-gnss.bin http://gnss-haydamaka.local/api/ota`.
+`curl -X POST --data-binary @build/remote-gnss.bin http://haydamaka-puck-gnss.local/api/ota`.
 It restarts into the new image by itself. Only a change to `partitions.csv`
 needs USB.
