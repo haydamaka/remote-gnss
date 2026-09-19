@@ -18,6 +18,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "nmea_hub.h"
+#include "radio_power.h"
 #include "waypoint.h"
 #include "wifi.h"
 #include "services/gap/ble_svc_gap.h"
@@ -601,6 +602,7 @@ static esp_err_t ble_stack_start(void)
     // 247 leaves 244 bytes of payload per notification, the most a 251-byte
     // link layer packet can carry without fragmenting.
     ble_att_set_preferred_mtu(247);
+    radio_power_apply_ble();
 
     nimble_port_freertos_init(host_task);
     return ESP_OK;

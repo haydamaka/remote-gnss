@@ -26,6 +26,7 @@
 #include "mag_cal.h"
 #include "magnetometer.h"
 #include "ota.h"
+#include "radio_power.h"
 #include "waypoint.h"
 #include "wifi.h"
 
@@ -337,6 +338,11 @@ static esp_err_t status_get(httpd_req_t *req)
     json_int(&j, "rssi", w.sta_rssi);
     json_str(&j, "hostname", CONFIG_RGNSS_HOSTNAME ".local");
     json_int(&j, "fallback_s", CONFIG_RGNSS_STA_FALLBACK_S);
+    json_close(&j);
+
+    json_open(&j, "radio");
+    json_num(&j, "wifi_dbm", radio_power_wifi_dbm(), 2);
+    json_int(&j, "ble_dbm", radio_power_ble_dbm());
     json_close(&j);
 
     json_open(&j, "ble");
@@ -878,6 +884,35 @@ static esp_err_t gnss_post(httpd_req_t *req)
     return reply(req, HTTPD_200, NULL);
 }
 
+// Transmit power: wifi_dbm and/or ble_dbm, form-encoded. WiFi takes it at once,
+// BLE on its next start.
+static esp_err_t radio_post(httpd_req_t *req)
+{
+    char body[64], value[12];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return reply(req, HTTPD_400, "The request was too long");
+    }
+    bool any = false;
+    if (httpd_query_key_value(body, "wifi_dbm", value, sizeof(value)) == ESP_OK) {
+        any = true;
+        esp_err_t err = radio_power_set_wifi_dbm(strtof(value, NULL));
+        if (err != ESP_OK) {
+            return reply(req, err == ESP_ERR_INVALID_ARG ? HTTPD_400 : HTTPD_500,
+                         err == ESP_ERR_INVALID_ARG ? "WiFi power must be 2-20 dBm" : "Couldn't save the setting");
+        }
+    }
+    if (httpd_query_key_value(body, "ble_dbm", value, sizeof(value)) == ESP_OK) {
+        any = true;
+        esp_err_t err = radio_power_set_ble_dbm((int)strtol(value, NULL, 10));
+        if (err != ESP_OK) {
+            return reply(req, err == ESP_ERR_INVALID_ARG ? HTTPD_400 : HTTPD_500,
+                         err == ESP_ERR_INVALID_ARG ? "BLE power must be 0-18 dBm in 3 dB steps, or 20"
+                                                    : "Couldn't save the setting");
+        }
+    }
+    return any ? reply(req, HTTPD_200, NULL) : reply(req, HTTPD_400, "Nothing to do");
+}
+
 static esp_err_t cal_stop_post(httpd_req_t *req)
 {
     mag_cal_stop();
@@ -1066,6 +1101,7 @@ esp_err_t webserver_start(void)
         {.uri = "/api/bearing", .method = HTTP_GET, .handler = bearing_get_handler},
         {.uri = "/api/waypoint", .method = HTTP_GET, .handler = waypoint_get_handler},
         {.uri = "/api/waypoint", .method = HTTP_POST, .handler = waypoint_post},
+        {.uri = "/api/radio", .method = HTTP_POST, .handler = radio_post},
         {.uri = "/api/bearing/log", .method = HTTP_GET, .handler = bearing_log_get},
         {.uri = "/api/bearing", .method = HTTP_POST, .handler = bearing_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},

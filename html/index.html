@@ -310,7 +310,52 @@
       </div>
       <p class="status" id="restart-msg" role="status"></p>
     </section>
-  </div>
+    <section>
+      <h2>Transmit power</h2>
+      <label for="p-wifi">WiFi</label>
+      <select id="p-wifi">
+        <option value="20">20 dBm (most)</option>
+        <option value="18">18 dBm</option>
+        <option value="16.5">16.5 dBm</option>
+        <option value="15">15 dBm</option>
+        <option value="13">13 dBm</option>
+        <option value="11">11 dBm</option>
+        <option value="8.5">8.5 dBm</option>
+        <option value="5">5 dBm</option>
+        <option value="2">2 dBm (least)</option>
+      </select>
+      <label for="p-ble">Bluetooth</label>
+      <select id="p-ble">
+        <option value="20">20 dBm (most)</option>
+        <option value="18">18 dBm</option>
+        <option value="15">15 dBm</option>
+        <option value="12">12 dBm</option>
+        <option value="9">9 dBm (default)</option>
+        <option value="6">6 dBm</option>
+        <option value="3">3 dBm</option>
+        <option value="0">0 dBm (least)</option>
+      </select>
+      <p class="note" id="p-note">More power reaches further and draws more current. On this board's small
+        antenna a lower WiFi power is sometimes the steadier link. WiFi changes at once; Bluetooth from its
+        next start.</p>
+    </section>
+    <section>
+      <h2>Saved networks</h2>
+      <ul class="nets" id="w-saved"><li class="note">Loading…</li></ul>
+      <p class="note" id="wifi-note"></p>
+    </section>
+    <section>
+      <h2>Add a network</h2>
+      <form id="wifi-form">
+        <label for="ssid">Network name</label>
+        <input id="ssid" name="ssid" required maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" minlength="8" maxlength="63"
+               autocomplete="new-password" placeholder="Leave empty for an open network">
+        <div class="buttons">
+          <button class="primary" type="submit">Save</button>
+          <button class="secondary" type="button" id="w-scan">Scan</button>
+        </div>
       </form>
       <ul class="nets" id="w-found" hidden></ul>
       <p class="status" id="msg" role="status"></p>
@@ -971,6 +1016,33 @@ $('restart').onclick = async () => {
   setTimeout(() => { $('restart').disabled = false; $('restart-msg').textContent = ''; }, 15000);
 };
 
+// Transmit power: the selects follow the device unless one was just changed.
+function renderRadio(radio) {
+  if (!radio || Date.now() < view.powerHeld) return;
+  const pick = (el, v) => {
+    // The nearest option, since the stored WiFi value is in quarter dBm.
+    let best = el.options[0];
+    for (const o of el.options) if (Math.abs(o.value - v) < Math.abs(best.value - v)) best = o;
+    el.value = best.value;
+  };
+  pick($('p-wifi'), radio.wifi_dbm);
+  pick($('p-ble'), radio.ble_dbm);
+}
+
+async function savePower(body, what) {
+  view.powerHeld = Date.now() + 3000;
+  try {
+    const r = await fetch('/api/radio', {method: 'POST', body, signal: AbortSignal.timeout(5000)});
+    if (!r.ok) throw new Error(await r.text());
+    $('p-note').textContent = what === 'ble' ? 'Saved; Bluetooth uses it from its next start.' : 'WiFi power changed.';
+  } catch (e) {
+    view.powerHeld = 0;
+    $('p-note').textContent = "Couldn't save that" + (e.message ? `: ${e.message}` : '.');
+  }
+}
+$('p-wifi').onchange = () => savePower(`wifi_dbm=${$('p-wifi').value}`, 'wifi');
+$('p-ble').onchange = () => savePower(`ble_dbm=${$('p-ble').value}`, 'ble');
+
 function renderSystem(sys) {
   const t = sys.uptime_s;
   const up = t < 120 ? `${t} s` : t < 7200 ? `${Math.floor(t / 60)} min` : `${Math.floor(t / 3600)} h ${Math.floor(t / 60) % 60} min`;
@@ -989,6 +1061,7 @@ async function poll() {
     renderWifi(s.wifi);
     renderBle(s.ble, s.wifi);
     renderSystem(s.system);
+    renderRadio(s.radio);
     $('offline').hidden = true;
   } catch {
     $('offline').hidden = false;
@@ -1035,7 +1108,7 @@ $('wifi-form').onsubmit = async e => {
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
-const view = {noSpoofedHeld: 0, motionHeld: 0, cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
+const view = {noSpoofedHeld: 0, motionHeld: 0, powerHeld: 0, cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
               fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0, autoAdjust: false,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];

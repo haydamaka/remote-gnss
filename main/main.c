@@ -12,6 +12,7 @@
 #include "mdns_service.h"
 #include "nmea_ble.h"
 #include "nmea_tcp.h"
+#include "radio_power.h"
 #include "webserver.h"
 #include "wifi.h"
 
@@ -37,6 +38,8 @@ void app_main(void)
     nvs_init();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    radio_power_load();
 
     // One radio, so one of the two, as the switch says.
     bool ble_mode = false;

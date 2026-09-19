@@ -15,6 +15,7 @@
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
 #include "nvs.h"
+#include "radio_power.h"
 
 #if __has_include("wifi_credentials.h")
 #include "wifi_credentials.h"
@@ -574,12 +575,16 @@ esp_err_t wifi_start(void)
     if (known == 0) {
         ESP_LOGI(TAG, "no station network configured");
         ESP_RETURN_ON_ERROR(ap_enable(), TAG, "enable AP");
-        return esp_wifi_start();
+        ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
+        radio_power_apply_wifi();
+        return ESP_OK;
     }
     ESP_LOGI(TAG, "%d saved network%s%s", n_saved, n_saved == 1 ? "" : "s",
              known > n_saved ? ", plus the built-in one" : "");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "set mode");
-    return esp_wifi_start();
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
+    radio_power_apply_wifi();
+    return ESP_OK;
 }
 
 esp_err_t wifi_save_station(const char *ssid, const char *password)

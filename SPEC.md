@@ -128,6 +128,7 @@ home network.
 | `POST /api/bearing` | `learning`, `applying`, `reset` or `save`, form-encoded |
 | `POST /api/heading` | `offset` in degrees, form-encoded: the correction added to the measured heading |
 | `POST /api/gnss` | form-encoded, any of: `withhold_spoofed=0\|1`, whether a fix that looks spoofed is kept from TCP and Bluetooth (`/api/status` reports it under `gnss`, with `withholding` when it is happening); `filter_speed=0\|1`, `motion=none\|walking\|vehicle\|both` (reported under `gnss` with `receiver_config`: `pending`, `ok`, `rejected` or `unsent`) |
+| `POST /api/radio` | form-encoded, any of: `wifi_dbm` (2-20, at once) and `ble_dbm` (0-18 in 3 dB steps, or 20; from the next BLE start); `/api/status` reports them under `radio` |
 | `POST /api/cal/points` | replace the buffered readings with a CSV (`x,y,z` or `seq,t_ms,x,y,z`) |
 | `GET /api/wifi` | the saved networks by name (never their passwords), how many can be saved, and the built-in one's name |
 | `POST /api/wifi` | `ssid` and `password`, form-encoded: save a network, or replace its password; no restart |
@@ -219,6 +220,9 @@ home network.
   use the same speed; the bearing learning keeps the receiver's. Speed and
   course are cleared when the receiver loses the fix, rather than kept from
   the last one.
+- **Transmit power** (added 2026-09-19) on the WiFi/BLE tab, kept in NVS: WiFi
+  2-20 dBm (default 20), applied at once; Bluetooth 0-20 dBm (default 9),
+  applied on its next start.
 - **Restart button** (added 2026-09-19) on the WiFi/BLE tab, next to the device
   line (`POST /api/restart`). A restart follows the switch: after a boot on
   WiFi against it (`$PPUCK,RADIO,WIFI` over BLE, or a failed BLE start), it goes
