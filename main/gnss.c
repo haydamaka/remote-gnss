@@ -13,6 +13,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "bearing.h"
 #include "minmea.h"
 #include "nmea_hub.h"
 #include "nvs.h"
@@ -21,6 +22,7 @@
 #define UART_RX_BUF_SIZE 2048
 #define NO_DATA_WARN_US (5 * 1000 * 1000)
 #define STATUS_POLL_US (2 * 1000 * 1000)
+#define HEADING_PERIOD_US (500 * 1000)  // $HCHDG/$HCHDT at 2 Hz
 #define BAUD_TRY_US (3 * 1000 * 1000)   // long enough for a sentence at any of these rates
 #define RELOCK_US (60 * 1000 * 1000)    // silence this long means the rate was wrong
 #define IMPLAUSIBLE_SPEED_KMH 900.0f  // faster than an airliner: the fix jumped
@@ -330,6 +332,123 @@ static void publish_withheld(const char *line, size_t len)
     }
 }
 
+#define MAX_FIELDS 24
+
+// Rewrites a sentence with fields[] (0 is the address), and a new checksum.
+static size_t rebuild(char *out, size_t size, char *const *fields, int n)
+{
+    size_t len = 0;
+    uint8_t sum = 0;
+    for (int i = 0; i < n; i++) {
+        int w = snprintf(out + len, size - len, "%s%s", i ? "," : "", fields[i]);
+        if (w < 0 || (size_t)w >= size - len) {
+            return 0;
+        }
+        len += (size_t)w;
+    }
+    for (size_t k = 1; k < len; k++) {
+        sum ^= (uint8_t)out[k];
+    }
+    int w = snprintf(out + len, size - len, "*%02X", sum);
+    return w == 3 ? len + 3 : 0;
+}
+
+// Below CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH the course over ground is noise, so
+// RMC and VTG go out with the compass heading in its place. Only with a fix:
+// a sentence saying "no fix" stays as it is. Publishes the sentence either way.
+static void publish_with_compass(const char *line, size_t len, float speed_kmh)
+{
+    bool rmc = strncmp(line + 3, "RMC,", 4) == 0, vtg = strncmp(line + 3, "VTG,", 4) == 0;
+    float true_deg, mag_deg;
+    if (CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH == 0 || !(rmc || vtg) ||
+        (isfinite(speed_kmh) && speed_kmh >= CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH) ||
+        !bearing_heading(&true_deg, &mag_deg)) {
+        nmea_hub_publish(line, len);
+        return;
+    }
+
+    char body[128];
+    const char *star = memchr(line, '*', len);
+    size_t body_len = star ? (size_t)(star - line) : len;
+    if (body_len >= sizeof(body)) {
+        nmea_hub_publish(line, len);
+        return;
+    }
+    memcpy(body, line, body_len);
+    body[body_len] = '\0';
+    char *fields[MAX_FIELDS];
+    int n = 0;
+    for (char *p = body; n < MAX_FIELDS; n++) {
+        fields[n] = p;
+        p = strchr(p, ',');
+        if (p == NULL) {
+            n++;
+            break;
+        }
+        *p++ = '\0';
+    }
+
+    // Rounded here, so 359.97 goes out as 0.0 rather than 360.0.
+    char t[8], m[8];
+    snprintf(t, sizeof(t), "%.1f", fmodf(roundf(true_deg * 10.0f) / 10.0f, 360.0f));
+    snprintf(m, sizeof(m), "%.1f", fmodf(roundf(mag_deg * 10.0f) / 10.0f, 360.0f));
+    if (rmc && n >= 9 && strcmp(fields[2], "A") == 0) {
+        fields[8] = t;
+    } else if (vtg && n >= 10 && fields[9][0] && strcmp(fields[9], "N") != 0) {
+        fields[1] = t;
+        fields[2] = "T";
+        fields[3] = m;
+        fields[4] = "M";
+    } else {
+        nmea_hub_publish(line, len);
+        return;
+    }
+    char out[128];
+    size_t out_len = rebuild(out, sizeof(out), fields, n);
+    if (out_len) {
+        nmea_hub_publish(out, out_len);
+    } else {
+        nmea_hub_publish(line, len);
+    }
+}
+
+// The compass as sentences of its own, for clients that show a heading
+// whatever the speed or fix: $HCHDG, magnetic, with the declination once a fix
+// has given one, and $HCHDT, true, only then. While the fix is withheld HDT is
+// held back and HDG goes without its declination, since a spoofed position
+// gives a wrong one; HDG's heading is the magnetometer alone and goes out
+// regardless. Nothing without a calibrated
+// reading, so a client can tell a silent compass from one pointing north.
+static void publish_heading(bool withholding)
+{
+    float mag_deg, decl;
+    if (!bearing_compass(&mag_deg, &decl)) {
+        return;
+    }
+    if (withholding) {
+        decl = NAN;
+    }
+    char h[8], v[8] = "", out[48];
+    snprintf(h, sizeof(h), "%.1f", fmodf(roundf(mag_deg * 10.0f) / 10.0f, 360.0f));
+    if (!isnan(decl)) {
+        snprintf(v, sizeof(v), "%.1f", fabsf(decl));
+    }
+    char *hdg[] = {"$HCHDG", h, "", "", v, isnan(decl) ? "" : decl < 0 ? "W" : "E"};
+    size_t n = rebuild(out, sizeof(out), hdg, 6);
+    if (n) {
+        nmea_hub_publish(out, n);
+    }
+    if (isnan(decl)) {
+        return;
+    }
+    snprintf(h, sizeof(h), "%.1f", fmodf(roundf(fmodf(mag_deg + decl + 360.0f, 360.0f) * 10.0f) / 10.0f, 360.0f));
+    char *hdt[] = {"$HCHDT", h, "T"};
+    n = rebuild(out, sizeof(out), hdt, 3);
+    if (n) {
+        nmea_hub_publish(out, n);
+    }
+}
+
 // Splits the byte stream into lines. The receiver also sends binary UBX
 // frames; any garbage they leave in a line fails minmea's checksum.
 static void reader_task(void *arg)
@@ -339,6 +458,7 @@ static void reader_task(void *arg)
     uint8_t buf[128];
     int64_t last_rx = esp_timer_get_time();
     int64_t last_poll = 0;
+    int64_t last_heading = 0;
     bool warned = false;
 
     size_t baud_idx = 0;
@@ -370,6 +490,11 @@ static void reader_task(void *arg)
             }
         }
 
+        // Before the read, so the compass keeps going while the receiver is silent.
+        if (esp_timer_get_time() - last_heading > HEADING_PERIOD_US) {
+            last_heading = esp_timer_get_time();
+            publish_heading(data.withholding);
+        }
         if (esp_timer_get_time() - last_poll > STATUS_POLL_US) {
             last_poll = esp_timer_get_time();
             uart_write_bytes(GNSS_UART, POLL_NAV_STATUS, sizeof(POLL_NAV_STATUS));
@@ -442,7 +567,10 @@ static void reader_task(void *arg)
                     if (withhold) {
                         publish_withheld(line, len);
                     } else {
-                        nmea_hub_publish(line, len);
+                        taskENTER_CRITICAL(&lock);
+                        float speed_kmh = data.speed_kmh;
+                        taskEXIT_CRITICAL(&lock);
+                        publish_with_compass(line, len, speed_kmh);
                     }
                 }
                 len = 0;

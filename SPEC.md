@@ -153,6 +153,14 @@ home network.
 - Plan: [EXTERNAL-GNSS.md](EXTERNAL-GNSS.md). Note that the ESP32-C3 has no
   Bluetooth Classic (no SPP): Bluetooth there means BLE with the Nordic UART
   Service.
+- **Compass as the course at low speed** (added 2026-09-19). Below 5 km/h
+  (`CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH`, 0 turns it off) the GNSS course over
+  ground is unreliable, so the RMC and VTG sent over TCP and BLE carry the
+  compass heading instead: the heading the page shows (learned correction and
+  offset included) plus the WMM declination as the true course, and without it
+  in VTG's magnetic field. Only with a fix, a fresh calibrated magnetometer
+  reading and the declination known; otherwise the receiver's course passes
+  unchanged. The page and the bearing learning still see the receiver's own.
 - **The radio is chosen by a switch only** (added 2026-09-18). A switch on GPIO10
   to ground: on is WiFi, off is Bluetooth. It is read at boot, and flipping it
   restarts the device on the other radio. The web page has no Bluetooth

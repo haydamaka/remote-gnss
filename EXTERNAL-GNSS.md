@@ -346,12 +346,22 @@ this machine gives a pty that `gpsd` accepts; GPS Connector or SW Maps on the
 phone connects and mock location works; and BLE plus WiFi run at the same time
 without either collapsing.
 
-### Phase 7 — Heading sentences (optional)
+### Phase 7 — Heading sentences
 
-Once calibration is finished, inject `$HCHDG`/`$HCHDM` (magnetic heading) and
-`$HCHDT` (true, once the WMM declination exists) into the stream at 1–2 Hz,
-with correct checksums and a toggle. Marine and mapping apps display these, and
-it is the one thing this device offers that a plain GPS dongle does not.
+Done 2026-09-19, for the Android app's compass (`remote-gnss-android`). Every
+500 ms `gnss.c` sends:
+
+- `$HCHDG,<magnetic>,,,<declination>,<E|W>` — the calibrated magnetometer with
+  the learned correction and the manual offset, as the page shows it. Needs no
+  fix; the declination fields stay empty until a fix has given one, and while
+  a fix is being withheld as spoofed.
+- `$HCHDT,<true>,T` — only once the declination is known, and not while a fix
+  is being withheld as spoofed (a false position gives a false declination).
+
+Neither goes out without a fresh calibrated reading, so a client can tell a
+silent compass from one pointing north. Both are in the default
+`CONFIG_RGNSS_NMEA_TYPES`, and cost about 60 B/s. No toggle: a client that
+doesn't know them ignores them.
 
 ## 7. Open questions
 

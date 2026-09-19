@@ -66,6 +66,16 @@ static uint32_t runs_dirty;  // bit k: key k has changed since it was saved
 // st.cal, tearing both the live window and the saved copy. A mutex, not a
 // spinlock, because a save holds it across a flash write.
 static SemaphoreHandle_t st_lock;
+
+// What bearing_heading() needs from the task, copied out each tick: the GNSS
+// reader calls it, and must not wait behind an NVS save or a relearn.
+static portMUX_TYPE snap_lock = portMUX_INITIALIZER_UNLOCKED;
+static struct {
+    bool have_decl;
+    float decl;
+    bool correct;  // applying, and something to apply
+    bearing_result_t result;
+} snap;
 static bearing_result_t latest;
 static TaskHandle_t task;
 
@@ -464,6 +474,14 @@ static void bearing_task(void *arg)
             tick(&p);
             dirty = true;
         }
+        float decl, horizontal;
+        bool have_decl = local_field(&g, &decl, &horizontal);
+        taskENTER_CRITICAL(&snap_lock);
+        snap.have_decl = have_decl;
+        snap.decl = decl;
+        snap.correct = st.applying && latest.have;
+        snap.result = latest;
+        taskEXIT_CRITICAL(&snap_lock);
 
         if (moving && st.total_s - last_trace_s >= TRACE_EVERY_S) {
             last_trace_s = st.total_s;
@@ -495,6 +513,42 @@ esp_err_t bearing_start(void)
     }
     ESP_LOGI(TAG, "watching for straight runs above 3 m/s");
     return ESP_OK;
+}
+
+bool bearing_compass(float *magnetic_deg, float *decl_deg)
+{
+    magnetometer_data_t m;
+    magnetometer_get(&m);
+    if (!m.updated_us || esp_timer_get_time() - m.updated_us >= MAG_STALE_US) {
+        return false;
+    }
+    float field[3];
+    if (!mag_cal_apply(m.field_ut, field)) {
+        return false;
+    }
+    float h = bearing_cal_heading(field);
+
+    taskENTER_CRITICAL(&snap_lock);
+    bool have_decl = snap.have_decl;
+    float decl = snap.decl;
+    if (snap.correct) {
+        h = bearing_cal_correct(&snap.result, h);
+    }
+    taskEXIT_CRITICAL(&snap_lock);
+    // In the order the page applies them: learned deviation, then the offset.
+    *magnetic_deg = fmodf(h + magnetometer_heading_offset() + 360.0f, 360.0f);
+    *decl_deg = have_decl ? decl : NAN;
+    return true;
+}
+
+bool bearing_heading(float *true_deg, float *magnetic_deg)
+{
+    float decl;
+    if (!bearing_compass(magnetic_deg, &decl) || isnan(decl)) {
+        return false;
+    }
+    *true_deg = fmodf(*magnetic_deg + decl + 360.0f, 360.0f);
+    return true;
 }
 
 void bearing_get(bearing_status_t *out)

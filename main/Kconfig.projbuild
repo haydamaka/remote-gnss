@@ -96,9 +96,21 @@ menu "Remote GNSS"
                 default matches four TCP clients and BLE. Each costs a buffer,
                 and they are all allocated at start-up.
 
+        config RGNSS_NMEA_COMPASS_BELOW_KMH
+            int "Send the compass heading as the course below this speed (km/h, 0 for never)"
+            range 0 100
+            default 5
+            help
+                Slower than this the course over ground is noise, so the RMC and
+                VTG sent over TCP and BLE carry the compass heading instead:
+                true in RMC and in VTG's true field, magnetic in VTG's
+                magnetic field. Only with a fix, a calibrated magnetometer and
+                the declination known; otherwise the receiver's course goes
+                out as it came.
+
         config RGNSS_NMEA_TYPES
             string "Sentence types to send (empty for all)"
-            default "RMC,GGA,GSA,VTG,GLL,GST,ZDA"
+            default "RMC,GGA,GSA,VTG,GLL,GST,ZDA,HDG,HDT"
             help
                 A comma-separated list of three-letter sentence types, matched
                 whatever the talker. The receiver's default is 10 Hz with every
@@ -106,7 +118,8 @@ menu "Remote GNSS"
                 it satellites-in-view; that saturates the link with more than one
                 client and is far past what BLE can carry. Leaving GSV out of
                 this list keeps the position, accuracy and time sentences.
-                Empty sends everything.
+                HDG and HDT are the compass (gnss.c, 2 Hz). Empty sends
+                everything.
 
         config RGNSS_TCP_ENABLED
             bool "Serve NMEA over TCP"

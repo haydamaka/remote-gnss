@@ -80,3 +80,13 @@ bool bearing_trace_at(size_t i, bearing_trace_t *out);
 // The correction itself is applied by whoever computes a heading: the page does
 // it from the coefficients in /api/status, the same way it applies the manual
 // offset. bearing_cal_correct() is the shared implementation.
+
+// The compass heading the page shows, with the learned correction when it is
+// being applied and the manual offset: magnetic, and true (plus the WMM
+// declination). False without a fresh calibrated reading, or before a fix has
+// given the declination. Never waits on the bearing task.
+bool bearing_heading(float *true_deg, float *magnetic_deg);
+
+// The same magnetic heading, which needs no fix, and the declination, NAN
+// until a fix has given one. False without a fresh calibrated reading.
+bool bearing_compass(float *magnetic_deg, float *decl_deg);
