@@ -264,6 +264,14 @@ trusted. Two independent sources, because either alone can be fooled:
   (the board has no 32 kHz one). The controller powers the radio down between
   radio events through the same `esp_phy_disable` call, and while advertising
   every read is a radio-off one.
+- Measured on 2026-09-19, reading every read with its radio state and the LED
+  state over USB: in BLE mode with a client connected, and in WiFi mode idle,
+  the samples hold to about 0.3-0.4 degrees of heading, with no trace of the
+  LED, of BLE events, or of the time since the radio last switched. With the
+  page polling, a sample corrected from radio-on reads (1.4-3.9 uT of scatter)
+  was a spike of up to 5 degrees, about one in twelve. A corrected sample is
+  now used only after half a second with no clean read, which took the heading
+  from 0.65 to 0.54 degrees standard deviation on the same recording.
 
 ## Magnetometer calibration
 

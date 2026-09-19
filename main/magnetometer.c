@@ -26,6 +26,12 @@
 // only after this many.
 #define OFFSET_GAIN (1.0f / 16.0f)
 #define OFFSET_LEARNED 16
+// A radio-on block is used, less the offset, only once this many blocks in a
+// row have had no clean read. The radio-on reads scatter by 1.4-3.9 uT with
+// what is transmitted, so a corrected sample in among clean ones is a spike
+// (up to 5 degrees of heading, measured 2026-09-19 with the page polling);
+// skipping it costs one sample in twelve. It is for when clean reads stop.
+#define CORRECT_AFTER_BLOCKS 5
 #define RESET_MS 20
 #define NVS_NAMESPACE "mag"
 #define NVS_KEY_OFFSET "hdg_off"
@@ -229,7 +235,8 @@ static int16_t median_of(int16_t *v, int n)
 // - reads the radio was off for are clean, and their per-axis median is the
 //   sample;
 // - with none, the median of the reads it was on for, less the radio offset,
-//   once that offset has been learned from blocks holding both kinds;
+//   once that offset has been learned from blocks holding both kinds, and only
+//   after CORRECT_AFTER_BLOCKS blocks in a row without a clean read;
 // - reads during which it switched are dropped, and so is a block with nothing
 //   usable, rather than publishing a reading that is tens of uT out.
 // For the IST8310 the measurement runs from the trigger to the read. The QMC
@@ -242,6 +249,7 @@ static void sample_task(void *arg)
     int n_off = 0, n_on = 0, reads = 0;
     float offset[3] = {0};  // radio on minus radio off, in counts
     uint32_t offset_seen = 0;
+    int blocks_unclean = 0;  // blocks in a row without a clean read
     unsigned switches_at_start = radio_switches, modems_at_start = radio_modems;
     TickType_t wake = xTaskGetTickCount();
     for (;;) {
@@ -288,7 +296,8 @@ static void sample_task(void *arg)
                 if (n_on >= MIN_ON_READS) {
                     offset[i] += OFFSET_GAIN * ((float)median_of(on[i], n_on) - raw[i] - offset[i]);
                 }
-            } else if (n_on >= MIN_ON_READS && offset_seen >= OFFSET_LEARNED) {
+            } else if (n_on >= MIN_ON_READS && offset_seen >= OFFSET_LEARNED &&
+                       blocks_unclean >= CORRECT_AFTER_BLOCKS) {
                 raw[i] = (int16_t)lroundf(median_of(on[i], n_on) - offset[i]);
                 corrected = true;
             } else {
@@ -298,6 +307,7 @@ static void sample_task(void *arg)
         if (n_off > 0 && n_on >= MIN_ON_READS) {
             offset_seen++;
         }
+        blocks_unclean = n_off > 0 ? 0 : blocks_unclean + 1;
         reads = n_off = n_on = 0;
 
         float field_ut[3], offset_ut[3];
