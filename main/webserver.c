@@ -274,6 +274,15 @@ static esp_err_t status_get(httpd_req_t *req)
     json_num(&j, "x", m.updated_us ? field[0] : NAN, 2);
     json_num(&j, "y", m.updated_us ? field[1] : NAN, 2);
     json_num(&j, "z", m.updated_us ? field[2] : NAN, 2);
+    // The same smoothed while at rest (magnetometer.c): what a heading uses.
+    float smooth[3];
+    mag_cal_apply(m.smooth_ut, smooth);
+    json_key(&j, "smooth");
+    if (m.updated_us) {
+        json_append(&j, "[%.2f,%.2f,%.2f]", smooth[0], smooth[1], smooth[2]);
+    } else {
+        json_append(&j, "null");
+    }
     json_num(&j, "heading_offset", magnetometer_heading_offset(), 1);
     json_open(&j, "radio");
     json_int(&j, "clean", m.samples_clean);
@@ -373,6 +382,10 @@ static esp_err_t mag_samples_get(httpd_req_t *req)
     json_num(&j, "ut_per_count", magnetometer_ut_per_count(), 6);
     json_int(&j, "seq", latest);
     json_bool(&j, "more", n > 0 && samples[n - 1].seq < latest);
+    // The latest sample smoothed while at rest, in uT like the samples times
+    // ut_per_count and uncalibrated like them: the heading comes from this.
+    json_key(&j, "smooth");
+    json_append(&j, "[%.2f,%.2f,%.2f]", m.smooth_ut[0], m.smooth_ut[1], m.smooth_ut[2]);
     json_key(&j, "samples");
     json_append(&j, "[");
     for (size_t i = 0; i < n; i++) {

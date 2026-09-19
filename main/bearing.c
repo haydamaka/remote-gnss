@@ -523,7 +523,7 @@ bool bearing_compass(float *magnetic_deg, float *decl_deg)
         return false;
     }
     float field[3];
-    if (!mag_cal_apply(m.field_ut, field)) {
+    if (!mag_cal_apply(m.smooth_ut, field)) {
         return false;
     }
     float h = bearing_cal_heading(field);

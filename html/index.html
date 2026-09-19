@@ -472,7 +472,8 @@ function renderMag(m) {
   $('mb').textContent = ok ? num(Math.hypot(m.x, m.y, m.z), 2, ' µT') : DASH;
   showOffset(m.heading_offset);  // before the heading, which uses the offset
   view.coef = m.heading_coef || null;
-  $('mh').textContent = ok ? num(corrected((Math.atan2(m.y, m.x) * 180 / Math.PI + 360) % 360), 1, '°') : DASH;
+  const hs = m.smooth || [m.x, m.y];
+  $('mh').textContent = ok ? num(corrected((Math.atan2(hs[1], hs[0]) * 180 / Math.PI + 360) % 360), 1, '°') : DASH;
   $('mag-note').textContent = (m.calibrated ? 'Calibrated (offset and shape corrected), sensor axes.' : 'Raw sensor axes, uncalibrated.') +
     ' The heading is atan2(Y, X)' + (view.offset ? ' plus the bearing offset' : '') +
     (view.coef ? ' and the correction learned from driving' : '') +
@@ -1247,7 +1248,9 @@ async function pollLive() {
       if (!view.skip && j.seq >= view.since && j.samples.length) {
         const [, , x, y, z] = j.samples[j.samples.length - 1];
         view.live = [x, y, z].map(v => v * j.ut_per_count);
-        const b = calibrated(view.live);
+        // The heading from the firmware's smoothed field, which holds still at
+        // rest; the plot's arrow keeps the latest sample.
+        const b = calibrated(j.smooth || view.live);
         view.headingRaw = (Math.atan2(b[1], b[0]) * 180 / Math.PI + 360) % 360;
         view.headingAt = Date.now();
         view.headingTarget = corrected(view.headingRaw);
@@ -1355,7 +1358,8 @@ async function setBearing(bearing) {
     const s = await fetch('/api/status', {cache: 'no-store', signal: AbortSignal.timeout(5000)});
     const m = (await s.json()).mag;
     if (m.x == null || m.age_ms > 2000) throw new Error('no recent reading from the magnetometer');
-    const raw = (Math.atan2(m.y, m.x) * 180 / Math.PI + 360) % 360;
+    const hs = m.smooth || [m.x, m.y];
+    const raw = (Math.atan2(hs[1], hs[0]) * 180 / Math.PI + 360) % 360;
     // The inverse of corrected(): the offset has to absorb the learned
     // deviation too, or the heading settles that far from what was asked for.
     const deg = ((bearing - raw - deviation(raw)) % 360 + 360) % 360;

@@ -33,6 +33,17 @@
 // skipping it costs one sample in twelve. It is for when clean reads stop.
 #define CORRECT_AFTER_BLOCKS 5
 #define RESET_MS 20
+// The smoothed field (smooth() below). At rest it moves SMOOTH_GAIN of the way
+// to each sample, a time constant of 2 s at 10 Hz. Two samples in a row more
+// than MOVE_UT from it horizontally, and within MOVE_UT / 2 of each other, are
+// a move: it jumps to the new reading and follows at FOLLOW_GAIN for
+// FOLLOW_SAMPLES. 2 uT is about 4 degrees here; tuned on recordings of the
+// board at rest, where the noise never reached it, and moved.
+#define SMOOTH_GAIN 0.05f
+#define FOLLOW_GAIN 0.5f
+#define FOLLOW_SAMPLES 10
+#define MOVE_UT 2.0f
+#define SMOOTH_GAP_US (1000 * 1000)  // no sample for this long starts it afresh
 #define NVS_NAMESPACE "mag"
 #define NVS_KEY_OFFSET "hdg_off"
 
@@ -231,6 +242,39 @@ static int16_t median_of(int16_t *v, int n)
     return v[n / 2];
 }
 
+static float horizontal_ut(const float a[3], const float b[3])
+{
+    return hypotf(a[0] - b[0], a[1] - b[1]);
+}
+
+// Updates s, the smoothed field, with sample f; a jitter filter for a compass
+// at rest that stays out of the way of one that turns. It works on the raw
+// field in the sensor's axes: calibration is affine, so smoothing before it is
+// smoothing after. "Horizontal" is the sensor's X-Y plane, as for the heading.
+static void smooth(float s[3], const float f[3], int64_t now)
+{
+    static float prev[3];
+    static int64_t last_us;
+    static int follow;
+    bool gap = last_us == 0 || now - last_us > SMOOTH_GAP_US;
+    bool moved = !gap && horizontal_ut(f, s) > MOVE_UT && horizontal_ut(prev, s) > MOVE_UT &&
+                 horizontal_ut(f, prev) < MOVE_UT / 2;
+    if (gap || moved) {
+        memcpy(s, f, 3 * sizeof(float));
+        follow = moved ? FOLLOW_SAMPLES : 0;
+    } else {
+        float gain = follow > 0 ? FOLLOW_GAIN : SMOOTH_GAIN;
+        for (int i = 0; i < 3; i++) {
+            s[i] += gain * (f[i] - s[i]);
+        }
+        if (follow > 0) {
+            follow--;
+        }
+    }
+    memcpy(prev, f, sizeof(prev));
+    last_us = now;
+}
+
 // Each block of reads becomes one sample:
 // - reads the radio was off for are clean, and their per-axis median is the
 //   sample;
@@ -250,6 +294,7 @@ static void sample_task(void *arg)
     float offset[3] = {0};  // radio on minus radio off, in counts
     uint32_t offset_seen = 0;
     int blocks_unclean = 0;  // blocks in a row without a clean read
+    float smoothed[3] = {0};
     unsigned switches_at_start = radio_switches, modems_at_start = radio_modems;
     TickType_t wake = xTaskGetTickCount();
     for (;;) {
@@ -316,6 +361,9 @@ static void sample_task(void *arg)
             offset_ut[i] = offset[i] * chip->ut_per_count;
         }
         int64_t now = esp_timer_get_time();
+        if (usable) {
+            smooth(smoothed, field_ut, now);
+        }
 
         taskENTER_CRITICAL(&lock);
         data.failing = failing;
@@ -333,6 +381,7 @@ static void sample_task(void *arg)
         }
         memcpy(data.raw, raw, sizeof(raw));
         memcpy(data.field_ut, field_ut, sizeof(field_ut));
+        memcpy(data.smooth_ut, smoothed, sizeof(smoothed));
         data.updated_us = now;
         magnetometer_sample_t *h = &history[next_seq % MAGNETOMETER_HISTORY];
         h->seq = next_seq++;

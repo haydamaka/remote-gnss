@@ -14,6 +14,7 @@ typedef struct {
     bool failing;         // the last read of the chip failed
     int16_t raw[3];       // X, Y, Z counts
     float field_ut[3];    // X, Y, Z in microtesla
+    float smooth_ut[3];   // the same, smoothed while the compass is at rest; what headings use
     uint32_t samples_clean;      // from reads with the radio off
     uint32_t samples_corrected;  // from reads with the radio on, less the offset
     uint32_t samples_skipped;    // blocks with nothing usable, not published

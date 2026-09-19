@@ -114,8 +114,8 @@ home network.
 | Method and path | What it does |
 |---|---|
 | `GET /` | the page itself, embedded in the firmware |
-| `GET /api/status` | GNSS fix, magnetometer reading (calibrated when there is a calibration), WiFi, and the device: uptime, last reset reason, build time, running slot, free heap |
-| `GET /api/mag/samples?since=SEQ` | raw magnetometer readings after that sequence number, with the scale factor; the board keeps the last 256 |
+| `GET /api/status` | GNSS fix, magnetometer reading (calibrated when there is a calibration, and `mag.smooth`, the same smoothed at rest), WiFi, and the device: uptime, last reset reason, build time, running slot, free heap |
+| `GET /api/mag/samples?since=SEQ` | raw magnetometer readings after that sequence number, with the scale factor, and `smooth`, the latest smoothed at rest in uT, uncalibrated; the board keeps the last 256 |
 | `GET /api/cal` | calibration state, progress, coverage, the criterion it is waiting on, how the last session ended, the live fit, the stored calibration, and how many readings are buffered |
 | `GET /api/cal/points` | the buffered readings themselves, streamed; fetch when `points_seq` changes |
 | `POST /api/cal/start[?fresh=1]` | start a session; it continues from the saved readings unless `fresh=1` |
@@ -272,6 +272,16 @@ trusted. Two independent sources, because either alone can be fooled:
   was a spike of up to 5 degrees, about one in twelve. A corrected sample is
   now used only after half a second with no clean read, which took the heading
   from 0.65 to 0.54 degrees standard deviation on the same recording.
+- Smoothing at rest (added 2026-09-19). Asked for: reduce the jitter while the
+  compass isn't moving. Each sample also updates a smoothed field, which the
+  heading is taken from everywhere - the page, `$HCHDG`/`$HCHDT` and the
+  compass course; the calibration plot keeps the raw samples. At rest it moves
+  1/20 of the way to each sample (a 2 s time constant). Two samples in a row
+  more than 2 uT (about 4 degrees) from it horizontally, and agreeing with each
+  other, are a move: it jumps to the reading and follows at half-steps for a
+  second. On the recordings the noise never reached 2 uT; live, with the page
+  polling, the heading went from 0.91 to 0.18 degrees standard deviation (5.9
+  to 0.9 peak to peak).
 
 ## Magnetometer calibration
 
