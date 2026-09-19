@@ -242,8 +242,9 @@ static esp_err_t status_get(httpd_req_t *req)
     magnetometer_get(&m);
     wifi_get_status(&w);
 
-    char buf[1536];
-    json_t j = {.buf = buf, .size = sizeof(buf)};
+    // In the shared scratch buffer rather than on the httpd stack: at 1.3 kB
+    // with a fix it had outgrown the 1.5 kB it used to have there.
+    json_t j = {.buf = req_scratch, .size = sizeof(req_scratch)};
     json_open(&j, NULL);
 
     json_open(&j, "gnss");

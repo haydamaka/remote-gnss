@@ -230,9 +230,9 @@ app — then sees the external position as if it were the built-in GPS.
 
 | App                       | TCP | BLE NUS | Notes                                    |
 |---------------------------|-----|---------|------------------------------------------|
-| **GPS Connector**         | yes | yes     | Bluetooth Classic, BLE, USB and TCP/IP in one app; the best single test client for us |
-| **GNSS Master** (ArduSimple) | yes | yes  | USB/Bluetooth/BLE/WiFi-TCP bridge, mock location, free |
-| **SW Maps**               | yes | yes     | Survey app, connects BLE receivers directly; useful as a "real app" test |
+| **GPS Connector**         | yes | yes     | Bluetooth Classic, BLE, USB and TCP/IP in one app, by its description; in use (2026-09-19) it does not connect to this device over BLE |
+| **GNSS Master** (ArduSimple) | yes | yes  | USB/Bluetooth/BLE/WiFi-TCP bridge, mock location, free; the one confirmed to work with this device over BLE (2026-09-19) |
+| **SW Maps**               | yes | yes     | Survey app, connects BLE receivers directly, by its description; does not connect to this device over BLE (2026-09-19) |
 | **Lefebure NTRIP Client** | yes | no      | TCP/IP receiver source + mock location; long-standing, widely used |
 | **nRF Connect**           | —   | yes     | Not a GPS app: a raw GATT browser, for proving the NUS service works at all before blaming the app |
 

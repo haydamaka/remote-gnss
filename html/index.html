@@ -30,7 +30,9 @@
     header { flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
     h1 { flex: 1 0 auto; font-size: 16px; }
     nav { flex: 1 0 100%; }
-    nav button { flex: 1; padding-inline: 4px; font-size: 12px; }
+    /* header nav: outranks the plain "nav button" rule below, which would
+       otherwise put back its padding and font size. */
+    header nav button { flex: 1 1 0; min-width: 0; padding-inline: 2px; font-size: 12px; line-height: 1.2; }
   }
   nav button {
     padding: 6px 14px; border: 0; border-radius: 8px; background: none;
@@ -48,8 +50,10 @@
   th { width: 38%; color: var(--muted); font-weight: normal; }
   td { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .note { margin: 8px 0; color: var(--muted); font-size: 13px; }
-  .check { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: 15px; }
-  .check input { margin: 0; }
+  /* The box by the first line of its label, however many lines that wraps to. */
+  .check { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 0; font-size: 15px; }
+  /* Its own size: the global input rule would stretch it across half the row. */
+  .check input { width: auto; flex: none; margin: 3px 0 0; }
   label { display: block; margin: 12px 0 4px; color: var(--muted); }
   input, select {
     width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
@@ -126,7 +130,8 @@
   .nets button.pick:hover { background: var(--bg); }
   .bar { height: 8px; margin: 6px 0; overflow: hidden; background: var(--line); border-radius: 4px; }
   .bar > div { width: 0; height: 100%; background: var(--accent); transition: width .3s; }
-  /* Wide screens: Position and Magnetometer side by side, equally tall. */
+  /* Wide screens: the GNSS card and the Magnetometer card side by side,
+     each with its readings and then its settings; on a phone they stack. */
   @media (min-width: 900px) {
     main { max-width: 1120px; }
     #panel-gnss { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
@@ -140,8 +145,8 @@
   <h1>Haydamaka Puck GNSS</h1>
   <nav role="tablist">
     <button role="tab" data-tab="compass" aria-selected="true">Compass</button>
-    <button role="tab" data-tab="gnss" aria-selected="false">GNSS/Magnetometer</button>
     <button role="tab" data-tab="dest" aria-selected="false">Destination</button>
+    <button role="tab" data-tab="gnss" aria-selected="false">GNSS/<wbr>Magnetometer</button>
     <button role="tab" data-tab="wifi" aria-selected="false">WiFi/BLE</button>
   </nav>
 </header>
@@ -172,7 +177,7 @@
 
   <div id="panel-gnss" role="tabpanel" hidden>
     <section>
-      <h2>Position</h2>
+      <h2>GNSS</h2>
       <p class="status" id="gnss-status">Loading…</p>
       <p class="status bad" id="gnss-warn" hidden></p>
       <table>
@@ -210,6 +215,7 @@
         <tr><th>Heading</th><td id="mh">—</td></tr>
       </table>
       <p class="note" id="mag-note"></p>
+      <h2 id="mag-config" hidden>Magnetometer config</h2>
       <div class="cal" id="cal" hidden>
         <div class="plot">
           <div class="segmented" role="radiogroup" aria-label="Plot view">
@@ -388,14 +394,15 @@
       </p>
       <h3>Over Bluetooth</h3>
       <ol class="note">
-        <li>Install <strong>GPS Connector</strong>, which speaks both BLE and TCP. GNSS
-            Master and SW Maps work the same way.</li>
+        <li>Install <strong>GNSS Master</strong> (ArduSimple, free). It is the bridge app known
+            to work with this device over Bluetooth; GPS Connector and SW Maps don't connect to
+            it.</li>
         <li>Turn the switch on the device off, for Bluetooth.</li>
         <li>In Android, unlock Developer options: Settings &rarr; About phone &rarr; tap
             <em>Build number</em> seven times.</li>
         <li>Settings &rarr; System &rarr; Developer options &rarr; <em>Select mock location
             app</em> &rarr; choose the bridge app.</li>
-        <li>In the app pick a <em>Bluetooth LE</em> connection and choose
+        <li>In GNSS Master pick a <em>Bluetooth LE</em> connection and choose
             <code class="ble-name">haydamaka-puck-gnss</code>. Do not pair it in Android's
             Bluetooth settings first &mdash; BLE devices are connected from inside the app.</li>
         <li>Turn its mock location on. Every other app now follows this device.</li>
@@ -403,7 +410,7 @@
       <h3>Over WiFi</h3>
       <ol class="note">
         <li>Put the phone on the same network as this device, or join its access point.</li>
-        <li>In the bridge app pick a <em>TCP/IP</em> connection and give it
+        <li>In GNSS Master pick a <em>TCP/IP</em> client connection and give it
             <code class="ble-host">haydamaka-puck-gnss.local</code> port <code>10110</code>. Use
             the address shown above if the name does not resolve.</li>
         <li>Set the mock location app as above.</li>
@@ -583,6 +590,7 @@ function renderMag(m) {
     status(el, m.chip, 'ok');
   }
   $('cal').hidden = !m.chip;
+  $('mag-config').hidden = !m.chip;
   const ok = m.x != null;
   $('mx').textContent = num(m.x, 2, ' µT');
   $('my').textContent = num(m.y, 2, ' µT');

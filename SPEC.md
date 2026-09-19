@@ -223,6 +223,15 @@ home network.
 - **Transmit power** (added 2026-09-19) on the WiFi/BLE tab, kept in NVS: WiFi
   2-20 dBm (default 20), applied at once; Bluetooth 0-20 dBm (default 9),
   applied on its next start.
+- **Tabs** (2026-09-19): Compass, Destination, GNSS/Magnetometer, WiFi/BLE.
+  GNSS/Magnetometer has two cards, side by side on a wide screen and stacked
+  on a phone: GNSS on the left (the position, then GNSS config: the spoofing
+  and speed settings) and Magnetometer on the right (the readings, then
+  Magnetometer config: calibration, Set bearing, Automatic adjustment). The
+  heading is always smoothed at rest; there is no setting for it. The speed
+  settings carry no explanation on the page.
+- **Phone app** (2026-09-19): GNSS Master is the Android bridge known to work
+  over BLE; GPS Connector and SW Maps don't connect. The page says so.
 - **Restart button** (added 2026-09-19) on the WiFi/BLE tab, next to the device
   line (`POST /api/restart`). A restart follows the switch: after a boot on
   WiFi against it (`$PPUCK,RADIO,WIFI` over BLE, or a failed BLE start), it goes
