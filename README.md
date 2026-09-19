@@ -17,7 +17,7 @@ The built-in station network lives in `main/wifi_credentials.h`, which git ignor
 cp main/wifi_credentials.h.example main/wifi_credentials.h   # then fill in the SSID and password
 ```
 
-Without it the device starts an open access point, `remote-gnss`; its page is at
+Without it the device starts an open access point, `haydamaka-puck-gnss`; its page is at
 http://192.168.4.1/. Other settings (access point name, mDNS hostname, pins) are
 under **Remote GNSS** in `idf.py menuconfig`.
 

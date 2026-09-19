@@ -41,7 +41,7 @@ LED), 9 (BOOT button), 20/21 (UART0, serial console).
   2. the built-in one: the macros `WIFI_STA_SSID` and `WIFI_STA_PASSWORD` in
      `main/wifi_credentials.h`. That file is kept out of git; see
      `main/wifi_credentials.h.example`.
-- **Soft access point.** An open access point (default name `remote-gnss`, no
+- **Soft access point.** An open access point (default name `haydamaka-puck-gnss`, no
   password) comes up when there are no credentials, or when the station has
   been without a connection for 30 s. It goes down again once the station
   connects.

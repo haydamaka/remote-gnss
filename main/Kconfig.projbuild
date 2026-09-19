@@ -4,7 +4,7 @@ menu "Remote GNSS"
 
         config RGNSS_AP_SSID
             string "Access point name"
-            default "remote-gnss"
+            default "haydamaka-puck-gnss"
             help
                 Open (passwordless) access point the device brings up when it has no
                 station network, or can't reach it. Station credentials come from the

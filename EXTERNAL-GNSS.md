@@ -245,7 +245,7 @@ stream** (some expect an NTRIP caster instead).
 
 Two Android connection topologies:
 
-- **Phone joins the device's soft AP** (`remote-gnss`, 192.168.4.1). Works
+- **Phone joins the device's soft AP** (`haydamaka-puck-gnss`, 192.168.4.1). Works
   anywhere, no infrastructure. Android usually keeps mobile data alive on a
   WiFi network with no internet, but this is worth checking on the actual
   phone.
