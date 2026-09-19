@@ -12,12 +12,15 @@
 //   TX      6E400003-...  notify, sentences out
 //   RX      6E400002-...  write, commands (below); anything else is ignored
 //
-// Commands are NMEA-style lines with a required checksum; lines not starting
-// "$PPUCK," are ignored.
+// Commands are NMEA-style lines with a required checksum; lines that are
+// neither "$PPUCK," nor a waypoint ("$--WPL,") are ignored.
 //   $PPUCK,WIFI,<SSID hex>,<password hex>*hh   save a network (wifi_save_station)
 //   $PPUCK,RADIO,WIFI*hh                       restart on WiFi, whatever the switch
+//   $--WPL,ddmm.mmmm,N,dddmm.mmmm,E,<id>*hh    navigate to it (waypoint.h)
+//   $PPUCK,WPL,CLEAR*hh                        stop navigating
 // The answer comes back on TX: $PPUCK,WIFI,OK, $PPUCK,WIFI,ERR,<FORMAT|INVALID|
-// FULL|STORE>, $PPUCK,RADIO,OK, or $PPUCK,ERR,<CHECKSUM|UNKNOWN|BUSY|MEMORY>. A
+// FULL|STORE>, $PPUCK,RADIO,OK, $PPUCK,WPL,OK, $PPUCK,WPL,ERR,<FORMAT|INVALID|
+// STORE>, or $PPUCK,ERR,<CHECKSUM|UNKNOWN|BUSY|MEMORY>. A
 // saved network is used on the next boot on WiFi, since until then the radio is
 // BLE's. RADIO,WIFI holds for that one boot: a power cycle or a reset goes back
 // to the switch, and so does flipping the switch either way.

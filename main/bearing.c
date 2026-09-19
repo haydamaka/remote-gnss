@@ -515,6 +515,15 @@ esp_err_t bearing_start(void)
     return ESP_OK;
 }
 
+bool bearing_declination(float *decl_deg)
+{
+    taskENTER_CRITICAL(&snap_lock);
+    bool have = snap.have_decl;
+    *decl_deg = snap.decl;
+    taskEXIT_CRITICAL(&snap_lock);
+    return have;
+}
+
 bool bearing_compass(float *magnetic_deg, float *decl_deg)
 {
     magnetometer_data_t m;

@@ -60,7 +60,7 @@
   .buttons button:disabled { opacity: .5; cursor: default; }
   .primary { border: 0; background: var(--accent); color: #fff; }
   .secondary { border: 1px solid var(--line); background: none; color: var(--fg); }
-  #msg:empty { display: none; }
+  #msg:empty, #d-msg:empty, #d-parsed:empty { display: none; }
   .cal { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; margin: 12px 0 8px; }
   .plot { display: flex; flex-direction: column; gap: 8px; }
   #plot {
@@ -107,6 +107,11 @@
   .compass-view .note { margin: 0; min-height: 1.4em; font-size: 15px; text-align: center; }
   .compass-view .note.off { color: var(--accent); font-weight: 600; }
   .fixinfo { width: 100%; max-width: 340px; }
+  .dest-view { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  #d-arrow { width: 160px; height: 160px; }
+  #d-arrow .ring { fill: none; stroke: var(--line); stroke-width: 2; }
+  #d-arrow .tip { fill: var(--accent); transition: transform .4s ease-out; transform-origin: 50px 50px; }
+  #d-turn { margin: 0; font-size: 17px; font-weight: 600; text-align: center; min-height: 1.4em; }
   /* The WiFi tab's lists: saved networks with a Forget each, and what a scan found. */
   .nets { margin: 4px 0 8px; padding: 0; list-style: none; }
   .nets > li { display: flex; align-items: center; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); }
@@ -126,7 +131,7 @@
     main { max-width: 1120px; }
     #panel-gnss { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     #panel-gnss > section { margin-bottom: 0; }
-    #panel-wifi { max-width: 560px; margin: 0 auto; }
+    #panel-wifi, #panel-dest { max-width: 560px; margin: 0 auto; }
   }
 </style>
 </head>
@@ -136,6 +141,7 @@
   <nav role="tablist">
     <button role="tab" data-tab="compass" aria-selected="true">Compass</button>
     <button role="tab" data-tab="gnss" aria-selected="false">GNSS/Magnetometer</button>
+    <button role="tab" data-tab="dest" aria-selected="false">Destination</button>
     <button role="tab" data-tab="wifi" aria-selected="false">WiFi/BLE</button>
   </nav>
 </header>
@@ -238,6 +244,46 @@
     </section>
   </div>
 
+  <div id="panel-dest" role="tabpanel" hidden>
+    <section>
+      <h2>Destination</h2>
+      <p class="status" id="d-status">Loading…</p>
+      <div class="dest-view" id="d-view" hidden>
+        <svg id="d-arrow" viewBox="0 0 100 100" role="img" aria-label="Arrow toward the destination">
+          <circle class="ring" cx="50" cy="50" r="46"/>
+          <path class="tip" id="d-tip" d="M50 8 L64 58 L50 50 L36 58 Z"/>
+        </svg>
+        <p id="d-turn" role="status"></p>
+      </div>
+      <table>
+        <tr><th>Name</th><td id="d-id">—</td></tr>
+        <tr><th>Position</th><td id="d-pos">—</td></tr>
+        <tr><th>Distance</th><td id="d-dist">—</td></tr>
+        <tr><th>Bearing</th><td id="d-bearing">—</td></tr>
+        <tr><th>Closing speed</th><td id="d-closing">—</td></tr>
+      </table>
+      <form id="d-form" autocomplete="off">
+        <label for="d-input">Coordinates</label>
+        <input id="d-input" placeholder="e.g. 50.4501, 30.5234" spellcheck="false">
+        <p class="note" id="d-parsed" role="status"></p>
+        <label for="d-name">Name (optional, up to 8 characters)</label>
+        <input id="d-name" maxlength="8" placeholder="DEST" spellcheck="false">
+        <div class="buttons">
+          <button class="primary" type="submit" id="d-set">Set destination</button>
+          <button class="secondary" type="button" id="d-clear">Clear</button>
+        </div>
+        <p class="status" id="d-msg" role="status"></p>
+      </form>
+      <p class="note">
+        Also set from a phone over Bluetooth: the Android app sends a place shared from
+        Google Maps, and any client can send <code>$GPWPL</code>. The device keeps it through
+        a restart and sends the way to it to every client as <code>$GPRMB</code> and
+        <code>$GPBWC</code>. The arrow points relative to the compass, so hold the device
+        level and facing ahead.
+      </p>
+    </section>
+  </div>
+
   <div id="panel-wifi" role="tabpanel" hidden>
     <section>
       <h2>Status</h2>
@@ -254,23 +300,7 @@
       </div>
       <p class="status" id="restart-msg" role="status"></p>
     </section>
-    <section>
-      <h2>Saved networks</h2>
-      <ul class="nets" id="w-saved"><li class="note">Loading…</li></ul>
-      <p class="note" id="wifi-note"></p>
-    </section>
-    <section>
-      <h2>Add a network</h2>
-      <form id="wifi-form">
-        <label for="ssid">Network name</label>
-        <input id="ssid" name="ssid" required maxlength="32" autocomplete="off" autocapitalize="none" spellcheck="false">
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" minlength="8" maxlength="63"
-               autocomplete="new-password" placeholder="Leave empty for an open network">
-        <div class="buttons">
-          <button class="primary" type="submit">Save</button>
-          <button class="secondary" type="button" id="w-scan">Scan</button>
-        </div>
+  </div>
       </form>
       <ul class="nets" id="w-found" hidden></ul>
       <p class="status" id="msg" role="status"></p>
@@ -345,6 +375,8 @@ function selectTab(name) {
   $('panel-compass').hidden = name !== 'compass';
   $('panel-gnss').hidden = name !== 'gnss';
   $('panel-wifi').hidden = name !== 'wifi';
+  $('panel-dest').hidden = name !== 'dest';
+  if (name === 'dest') pollDest();
   history.replaceState(null, '', name === 'compass' ? location.pathname : '#' + name);
   if (name === 'wifi') loadSaved();
   if (view.cal && view.cal.state === 'running') animate(); else draw();
@@ -634,6 +666,249 @@ function renderBle(ble, wifi) {
   const host = wifi.hostname || '';
   document.querySelectorAll('.ble-name').forEach(e => e.textContent = host.replace(/\.local$/, ''));
   document.querySelectorAll('.ble-host').forEach(e => e.textContent = host);
+}
+
+// ---- Destination ----
+// The device works out the way (/api/waypoint); the page turns it into an
+// arrow against the compass heading, which pollLive() keeps current.
+let dest = null, destTimer = 0, destAngle = 0;
+
+const distance = m => m < 1000 ? `${Math.round(m)} m` : m < 100000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m / 1000)} km`;
+
+function renderDest() {
+  const d = dest;
+  const nav = d && d.nav;
+  $('d-id').textContent = d && d.set ? (d.id || '(no name)') : DASH;
+  if (d && d.set) {
+    const pos = `${d.lat.toFixed(6)}, ${d.lon.toFixed(6)}`;
+    const a = document.createElement('a');
+    a.href = `https://www.google.com/maps?q=${d.lat},${d.lon}`;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = pos;
+    $('d-pos').replaceChildren(a);
+  } else {
+    $('d-pos').textContent = DASH;
+  }
+  $('d-dist').textContent = nav ? distance(nav.distance_m) : DASH;
+  $('d-bearing').textContent = nav
+    ? `${nav.bearing_true.toFixed(0)}° true` + (nav.bearing_mag != null ? ` · ${nav.bearing_mag.toFixed(0)}° magnetic` : '')
+    : DASH;
+  $('d-closing').textContent = nav && nav.closing_kn != null ? `${(nav.closing_kn * 1.852).toFixed(1)} km/h` : DASH;
+
+  if (!d || !d.set) status($('d-status'), 'No destination', 'warn');
+  else if (!nav) status($('d-status'), 'Waiting for a GNSS fix', 'warn');
+  else if (nav.arrived) status($('d-status'), 'Arrived', 'ok');
+  else status($('d-status'), `${distance(nav.distance_m)} to go`, 'ok');
+
+  // The arrow: the magnetic bearing against the compass heading, both magnetic.
+  const heading = view.headingTarget;
+  const show = nav && !nav.arrived && nav.bearing_mag != null && heading != null;
+  $('d-view').hidden = !show;
+  if (show) {
+    const rel = ((nav.bearing_mag - heading + 540) % 360) - 180;
+    // Turn the short way round, rather than spinning when it crosses behind.
+    destAngle += ((rel - destAngle) % 360 + 540) % 360 - 180;
+    $('d-tip').style.transform = `rotate(${destAngle}deg)`;
+    $('d-turn').textContent = Math.abs(rel) < 5 ? 'Straight ahead'
+      : `${Math.abs(rel).toFixed(0)}° ${rel < 0 ? 'left' : 'right'}`;
+  }
+}
+
+// Reads a position typed or pasted in almost any common form. Returns
+// {lat, lon, note} or {error}. note says what it had to guess.
+function parseCoordinates(input) {
+  let s = String(input || '').trim();
+  if (!s) return {error: 'Enter coordinates.'};
+  if (/goo\.gl\/|maps\.app\./i.test(s)) {
+    return {error: 'A short link has no coordinates in it. Open it, then copy the coordinates or the full address from the browser.'};
+  }
+  const notes = [];
+
+  // Links: Google Maps (@lat,lon / q= / ll= / query= / !3d..!4d..), OSM (mlat/mlon, #map=z/lat/lon), geo:.
+  let m;
+  if ((m = s.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/))) s = `${m[1]} ${m[2]}`;
+  else if ((m = s.match(/[?&](?:q|query|ll|daddr|destination|center)=(?:loc:)?(-?\d+(?:\.\d+)?)\s*(?:,|%2C)\s*(-?\d+(?:\.\d+)?)/i))) s = `${m[1]} ${m[2]}`;
+  else if ((m = s.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/))) s = `${m[1]} ${m[2]}`;
+  else if ((m = s.match(/mlat=(-?\d+(?:\.\d+)?).*?mlon=(-?\d+(?:\.\d+)?)/i))) s = `${m[1]} ${m[2]}`;
+  else if ((m = s.match(/#map=\d+\/(-?\d+(?:\.\d+)?)\/(-?\d+(?:\.\d+)?)/))) s = `${m[1]} ${m[2]}`;
+  else if ((m = s.match(/^geo:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)/i))) s = `${m[1]} ${m[2]}`;
+
+  // Hemisphere words and letters, English and Ukrainian, to N S E W.
+  s = s.toUpperCase()
+    .replace(/ПН\.?\s*Ш\.?|ПІВНІЧ\w*|ПН\b/g, 'N').replace(/ПД\.?\s*Ш\.?|ПІВДЕН\w*|ПД\b/g, 'S')
+    .replace(/СХ\.?\s*Д\.?|СХІД\w*|СХ\b/g, 'E').replace(/ЗХ\.?\s*Д\.?|ЗАХІД\w*|ЗХ\b/g, 'W')
+    .replace(/\bNORTH\b/g, 'N').replace(/\bSOUTH\b/g, 'S').replace(/\bEAST\b/g, 'E').replace(/\bWEST\b/g, 'W')
+    .replace(/\bLAT(ITUDE)?\b|\bLONG?(ITUDE)?\b|\bLNG\b/g, ' ');
+  // Every kind of degree, minute and second mark to one of ° ' ".
+  // d m s as units: 50d 27m 0.4s. An S is seconds only before a hemisphere letter.
+  s = s.replace(/(\d)\s*M(?=[\s\d]|$)/g, "$1'").replace(/(\d)\s*S(?=\s*[NSEW](?![A-Z]))/g, '$1"');
+  s = s.replace(/[º˚∘]|\bDEG\b|(?<=\d)\s*D(?=[\s\d]|$)/g, '°')
+       .replace(/[′’‘`´]/g, "'").replace(/[″”“]|''/g, '"');
+  // A decimal comma: a digit, a comma, digits, where the comma can't be the separator between two numbers.
+  const commas = (s.match(/,/g) || []).length;
+  if (commas === 2 || (commas === 1 && /\d,\d+\s+-?\d/.test(s)) ||
+      (commas >= 2 && /[;|\/]/.test(s))) {
+    s = s.replace(/(\d),(\d)/g, '$1.$2');
+    notes.push('read "," as a decimal point');
+  }
+  s = s.replace(/[;,|\/\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+
+  // Tokens: a number (with its own marks), or a hemisphere letter.
+  const parts = [];
+  // A letter counts only on its own, not inside a word ("extra" is no E).
+  const re = /(?<![A-Z])([NSEW])(?![A-Z])|(-|\+)?\s*(\d+(?:\.\d+)?)\s*(°|'|")?/g;
+  let t;
+  while ((t = re.exec(s))) {
+    if (t[1]) parts.push({hemi: t[1]});
+    else if (t[3] !== undefined) parts.push({sign: t[2] === '-' ? -1 : 1, v: parseFloat(t[3]), mark: t[4] || ''});
+  }
+  if (!parts.length) return {error: "That doesn't look like coordinates."};
+
+  // Group into two coordinates.
+  const coords = [];
+  const hemis = parts.filter(p => p.hemi).length;
+  const nums = parts.filter(p => !p.hemi);
+  if (hemis === 2) {
+    // By the letters: each owns the numbers after it (letters first) or before it.
+    const prefix = !!parts[0].hemi;
+    let cur = null;
+    for (const p of parts) {
+      if (p.hemi) {
+        if (prefix) { if (cur) coords.push(cur); cur = {hemi: p.hemi, nums: [], sign: 1}; }
+        else { if (!cur) cur = {nums: [], sign: 1}; cur.hemi = p.hemi; coords.push(cur); cur = null; }
+      } else {
+        if (!cur) cur = {nums: [], sign: p.sign};
+        cur.nums.push(p);
+      }
+    }
+    if (cur && (prefix || cur.nums.length)) coords.push(cur);
+    if (coords.some(c => !c.nums.length || c.nums.length > 3)) return {error: "Couldn't tell which numbers go with which letter."};
+  } else if (hemis === 0 && nums.every(p => !p.mark) && [2, 4, 6].includes(nums.length)) {
+    // Bare numbers: two decimal degrees, or degrees and minutes (and seconds) twice.
+    const k = nums.length / 2;
+    coords.push({nums: nums.slice(0, k), sign: nums[0].sign}, {nums: nums.slice(k), sign: nums[k].sign});
+  } else if (hemis > 2) {
+    return {error: 'Found more than two N/S/E/W letters.'};
+  } else {
+    // By the marks: a coordinate ends where they start over (a ° again, or a
+    // mark no finer than the last), or after seconds.
+    const order = {'°': 0, "'": 1, '"': 2};
+    let cur = null;
+    for (const p of parts) {
+      if (p.hemi) {
+        if (cur && cur.nums.length && !cur.hemi) { cur.hemi = p.hemi; coords.push(cur); cur = null; }
+        else { if (cur && cur.nums.length) coords.push(cur); cur = {hemi: p.hemi, nums: [], sign: 1}; }
+        continue;
+      }
+      const last = cur && cur.nums[cur.nums.length - 1];
+      const restart = last && (!p.mark || !last.mark || p.mark === '°' || order[p.mark] <= order[last.mark] ||
+                               cur.nums.length === 3);
+      if (!cur || restart) {
+        if (cur && cur.nums.length) coords.push(cur);
+        cur = {nums: [], sign: p.sign};
+      }
+      cur.nums.push(p);
+    }
+    if (cur && cur.nums.length) coords.push(cur);
+  }
+  if (coords.length !== 2) {
+    return {error: coords.length < 2 ? 'Need both latitude and longitude.' : 'Found more than two coordinates.'};
+  }
+
+  const value = c => {
+    let [d, mi = {v: 0}, se = {v: 0}] = c.nums;
+    // Unmarked parts after the degrees are minutes, then seconds.
+    if (mi.v >= 60 || se.v >= 60) return NaN;
+    let v = d.v + mi.v / 60 + se.v / 3600;
+    if (c.sign < 0 && (c.hemi === 'N' || c.hemi === 'E')) return -Infinity;  // a minus and N or E disagree
+    if (c.sign < 0) v = -v;
+    if (c.hemi === 'S' || c.hemi === 'W') v = -Math.abs(v);
+    return v;
+  };
+  let [a, b] = coords;
+  let lat = value(a), lon = value(b);
+  if (lat === -Infinity || lon === -Infinity) return {error: 'A minus sign and N or E contradict each other.'};
+  if (!isFinite(lat) || !isFinite(lon)) return {error: 'Minutes and seconds must be under 60.'};
+
+  // Which is which: by the letters when there are any, else latitude first.
+  const isLon = c => c.hemi === 'E' || c.hemi === 'W';
+  const isLat = c => c.hemi === 'N' || c.hemi === 'S';
+  if (isLon(a) || isLat(b)) {
+    [lat, lon] = [lon, lat];
+    if (!(isLon(a) && isLat(b)) && !(isLon(a) && !b.hemi) && !(!a.hemi && isLat(b))) return {error: 'Both look like the same kind of coordinate.'};
+  } else if (!a.hemi && !b.hemi && Math.abs(lat) > 90 && Math.abs(lon) <= 90) {
+    [lat, lon] = [lon, lat];
+    notes.push('swapped them: the first is over 90°, so it must be the longitude');
+  }
+  if ((isLat(a) && isLat(b)) || (isLon(a) && isLon(b))) return {error: 'Both look like the same kind of coordinate.'};
+  if (Math.abs(lat) > 90) return {error: 'Latitude must be within 90°.'};
+  if (Math.abs(lon) > 180) return {error: 'Longitude must be within 180°.'};
+  return {lat, lon, note: notes.join('; ')};
+}
+
+// NMEA carries printable ASCII without its reserved characters, eight of them.
+function waypointName(raw) {
+  const clean = raw.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\x20-\x7e]|[,*$!\\^~]/g, '').trim().slice(0, 8);
+  return {name: clean, dropped: clean !== raw.trim().slice(0, 8)};
+}
+
+$('d-input').oninput = () => {
+  const text = $('d-input').value;
+  if (!text.trim()) { $('d-parsed').textContent = ''; return; }
+  const r = parseCoordinates(text);
+  $('d-parsed').textContent = r.error ? r.error
+    : `Reads as ${r.lat.toFixed(6)}, ${r.lon.toFixed(6)}` + (r.note ? ` (${r.note})` : '');
+};
+
+$('d-form').onsubmit = async e => {
+  e.preventDefault();
+  const r = parseCoordinates($('d-input').value);
+  if (r.error) { status($('d-msg'), r.error, 'bad'); return; }
+  const {name, dropped} = waypointName($('d-name').value);
+  const body = new URLSearchParams({lat: r.lat.toFixed(7), lon: r.lon.toFixed(7), id: name || 'DEST'});
+  $('d-set').disabled = true;
+  try {
+    const res = await fetch('/api/waypoint', {method: 'POST', body, signal: AbortSignal.timeout(5000)});
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || res.statusText);
+    status($('d-msg'), `Destination set to ${name || 'DEST'}` +
+           (dropped ? ' (letters NMEA can\'t carry were left out of the name)' : '') + '.', 'ok');
+    $('d-input').value = '';
+    $('d-parsed').textContent = '';
+    pollDest();
+  } catch (err) {
+    status($('d-msg'), "Couldn't set it: " + err.message, 'bad');
+  } finally {
+    $('d-set').disabled = false;
+  }
+};
+
+$('d-clear').onclick = async () => {
+  if (!confirm('Forget the destination?')) return;
+  try {
+    const res = await fetch('/api/waypoint', {method: 'POST', body: 'clear=1', signal: AbortSignal.timeout(5000)});
+    if (!res.ok) throw new Error();
+    status($('d-msg'), 'No destination now.', 'ok');
+    pollDest();
+  } catch {
+    status($('d-msg'), "Couldn't clear it.", 'bad');
+  }
+};
+
+async function pollDest() {
+  clearTimeout(destTimer);
+  if (!document.hidden && !$('panel-dest').hidden) {
+    try {
+      const r = await fetch('/api/waypoint', {cache: 'no-store', signal: AbortSignal.timeout(3000)});
+      dest = await r.json();
+    } catch {
+      // the status poll already shows when the device is unreachable
+    }
+    renderDest();
+  }
+  destTimer = setTimeout(pollDest, 1000);
 }
 
 let lastBle = {};
@@ -1240,7 +1515,7 @@ async function pollCal() {
 // Idle unless the plot is actually on screen: this runs on phones.
 async function pollLive() {
   const showing = !document.hidden &&
-                  (!$('panel-compass').hidden || (!$('panel-gnss').hidden && !$('cal').hidden));
+                  (!$('panel-compass').hidden || !$('panel-dest').hidden || (!$('panel-gnss').hidden && !$('cal').hidden));
   if (showing) {
     try {
       const r = await fetch(`/api/mag/samples?since=${view.since}`, {cache: 'no-store', signal: AbortSignal.timeout(3000)});
@@ -1255,6 +1530,7 @@ async function pollLive() {
         view.headingAt = Date.now();
         view.headingTarget = corrected(view.headingRaw);
         renderSteer();
+        if (!$('panel-dest').hidden) renderDest();
         if (view.mode === 'compass' || !$('panel-compass').hidden) animate();
         else if (!view.animating) draw();
       }
@@ -1416,7 +1692,7 @@ sphere.onpointermove = e => {
 };
 sphere.onpointerup = sphere.onpointercancel = sphere.onlostpointercapture = () => { view.drag = null; };
 
-const tabFromHash = () => ({'#wifi': 'wifi', '#gnss': 'gnss'})[location.hash] || 'compass';
+const tabFromHash = () => ({'#wifi': 'wifi', '#gnss': 'gnss', '#dest': 'dest'})[location.hash] || 'compass';
 addEventListener('hashchange', () => selectTab(tabFromHash()));
 addEventListener('visibilitychange', () => {
   if (!document.hidden && view.cal && view.cal.state === 'running') animate();

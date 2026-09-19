@@ -87,6 +87,11 @@ bool bearing_trace_at(size_t i, bearing_trace_t *out);
 // given the declination. Never waits on the bearing task.
 bool bearing_heading(float *true_deg, float *magnetic_deg);
 
+// The WMM declination here, degrees east positive, from the bearing task's
+// once-a-minute sum; false before a fix has given one. Never waits, and costs
+// the caller no stack, unlike wmm_field().
+bool bearing_declination(float *decl_deg);
+
 // The same magnetic heading, which needs no fix, and the declination, NAN
 // until a fix has given one. False without a fresh calibrated reading.
 bool bearing_compass(float *magnetic_deg, float *decl_deg);

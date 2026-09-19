@@ -110,7 +110,7 @@ menu "Remote GNSS"
 
         config RGNSS_NMEA_TYPES
             string "Sentence types to send (empty for all)"
-            default "RMC,GGA,GSA,VTG,GLL,GST,ZDA,HDG,HDT"
+            default "RMC,GGA,GSA,VTG,GLL,GST,ZDA,HDG,HDT,RMB,BWC"
             help
                 A comma-separated list of three-letter sentence types, matched
                 whatever the talker. The receiver's default is 10 Hz with every
@@ -118,8 +118,9 @@ menu "Remote GNSS"
                 it satellites-in-view; that saturates the link with more than one
                 client and is far past what BLE can carry. Leaving GSV out of
                 this list keeps the position, accuracy and time sentences.
-                HDG and HDT are the compass (gnss.c, 2 Hz). Empty sends
-                everything.
+                HDG and HDT are the compass (gnss.c, 2 Hz); RMB and BWC the
+                way to the destination set with WPL (waypoint.c, 1 Hz). Empty
+                sends everything.
 
         config RGNSS_TCP_ENABLED
             bool "Serve NMEA over TCP"

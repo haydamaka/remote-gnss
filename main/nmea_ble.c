@@ -18,6 +18,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "nmea_hub.h"
+#include "waypoint.h"
 #include "wifi.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
@@ -123,6 +124,36 @@ static bool unhex(const char *hex, size_t n, char *out, size_t max)
     return true;
 }
 
+// The standard waypoint sentence, from any talker: $GPWPL, $ECWPL, ...
+static bool is_wpl(const char *line)
+{
+    return line[0] == '$' && line[1] != 'P' && strncmp(line + 3, "WPL,", 4) == 0;
+}
+
+// $--WPL,ddmm.mmmm,N,dddmm.mmmm,E,<id>*hh sets the destination the NMEA
+// outputs navigate to ($GPRMB, $GPBWC); $PPUCK,WPL,CLEAR forgets it. WPL has
+// no answer of its own in NMEA, so these get $PPUCK,WPL,OK or
+// $PPUCK,WPL,ERR,<FORMAT|INVALID|STORE>.
+static void run_wpl(const char *fields)
+{
+    waypoint_t wp;
+    if (!waypoint_parse_wpl(fields, &wp)) {
+        set_reply("PPUCK,WPL,ERR,FORMAT");
+        return;
+    }
+    switch (waypoint_set(&wp)) {
+    case ESP_OK:
+        set_reply("PPUCK,WPL,OK");
+        break;
+    case ESP_ERR_INVALID_ARG:
+        set_reply("PPUCK,WPL,ERR,INVALID");
+        break;
+    default:
+        set_reply("PPUCK,WPL,ERR,STORE");
+        break;
+    }
+}
+
 // $PPUCK,WIFI,<SSID in hex>,<password in hex>*hh saves a network for the next
 // boot on WiFi, as the web page would; answered with $PPUCK,WIFI,OK or
 // $PPUCK,WIFI,ERR,<why>. Hex, so that commas and asterisks in either need no
@@ -145,7 +176,16 @@ static void run_command(char *line)
     }
     *star = '\0';
 
+    // "$--WPL," and "$PPUCK," are both seven characters.
     const char *args = line + 7;
+    if (is_wpl(line)) {
+        run_wpl(args);
+        return;
+    }
+    if (strcmp(args, "WPL,CLEAR") == 0) {
+        set_reply(waypoint_clear() == ESP_OK ? "PPUCK,WPL,OK" : "PPUCK,WPL,ERR,STORE");
+        return;
+    }
     if (strcmp(args, "RADIO,WIFI") == 0) {
         // Answer first and give the pump time to send it: the restart takes
         // the connection with it.
@@ -242,7 +282,7 @@ static int rx_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
                     rx_len--;
                 }
                 rx_line[rx_len] = '\0';
-                if (strncmp(rx_line, "$PPUCK,", 7) == 0) {
+                if (strncmp(rx_line, "$PPUCK,", 7) == 0 || is_wpl(rx_line)) {
                     start_command(rx_line);
                 }
                 memset(rx_line, 0, sizeof(rx_line));  // it may have held a password

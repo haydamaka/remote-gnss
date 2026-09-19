@@ -26,6 +26,7 @@
 #include "mag_cal.h"
 #include "magnetometer.h"
 #include "ota.h"
+#include "waypoint.h"
 #include "wifi.h"
 
 static const char *TAG = "web";
@@ -262,7 +263,6 @@ static esp_err_t status_get(httpd_req_t *req)
     json_bool(&j, "implausible", g.implausible);
     json_str(&j, "implausible_why", g.implausible_why[0] ? g.implausible_why : NULL);
     json_bool(&j, "withhold_spoofed", gnss_withhold_spoofed());
-    json_bool(&j, "withholding", g.withholding);
     json_close(&j);
 
     float field[3];
@@ -597,6 +597,87 @@ static esp_err_t cal_accept_post(httpd_req_t *req)
 }
 
 // What has been learned from driving, and how much it can be trusted.
+// The destination set over BLE with WPL, and the way to it from the current
+// fix, as RMB and BWC give it: the page's Destination tab.
+static esp_err_t waypoint_get_handler(httpd_req_t *req)
+{
+    gnss_data_t g;
+    gnss_get(&g);
+    waypoint_t wp;
+    waypoint_nav_t nav;
+    bool have = waypoint_get(&wp);
+    bool navigating = have && waypoint_nav(&g, &wp, &nav);
+
+    char buf[384];
+    json_t j = {.buf = buf, .size = sizeof(buf)};
+    json_open(&j, NULL);
+    json_bool(&j, "set", have);
+    if (have) {
+        json_str(&j, "id", wp.id);
+        json_num(&j, "lat", wp.latitude, 7);
+        json_num(&j, "lon", wp.longitude, 7);
+    }
+    json_key(&j, "nav");
+    if (navigating) {
+        json_open(&j, NULL);
+        json_num(&j, "distance_m", nav.distance_m, 1);
+        json_num(&j, "bearing_true", nav.bearing_true, 1);
+        json_num(&j, "bearing_mag", nav.bearing_mag, 1);
+        json_num(&j, "closing_kn", nav.closing_kn, 1);
+        json_bool(&j, "arrived", nav.arrived);
+        json_close(&j);
+    } else {
+        json_append(&j, "null");
+    }
+    json_close(&j);
+    return send_json(req, &j, "waypoint");
+}
+
+// Sets the destination from the page: lat and lon in decimal degrees and an
+// optional id, form-encoded; or clear=1. The page does the forgiving parsing of
+// what was typed, this only checks what arrives, as waypoint_set() does.
+static esp_err_t waypoint_post(httpd_req_t *req)
+{
+    char body[128], value[32];
+    if (read_body(req, body, sizeof(body)) != ESP_OK) {
+        return reply(req, HTTPD_400, "The request was too long");
+    }
+    if (httpd_query_key_value(body, "clear", value, sizeof(value)) == ESP_OK && value[0] == '1') {
+        return waypoint_clear() == ESP_OK ? reply(req, HTTPD_200, NULL)
+                                          : reply(req, HTTPD_500, "Couldn't forget the destination");
+    }
+    waypoint_t wp = {0};
+    char *end;
+    if (httpd_query_key_value(body, "lat", value, sizeof(value)) != ESP_OK ||
+        (wp.latitude = strtod(value, &end), end == value) ||
+        httpd_query_key_value(body, "lon", value, sizeof(value)) != ESP_OK ||
+        (wp.longitude = strtod(value, &end), end == value)) {
+        return reply(req, HTTPD_400, "Give lat and lon in degrees");
+    }
+    // The name arrives URL-encoded; httpd_query_key_value leaves it so.
+    char id[3 * WAYPOINT_ID_MAX + 1] = "";
+    if (httpd_query_key_value(body, "id", id, sizeof(id)) == ESP_OK) {
+        size_t o = 0;
+        for (size_t i = 0; id[i] && o < WAYPOINT_ID_MAX; i++) {
+            if (id[i] == '%' && isxdigit((unsigned char)id[i + 1]) && isxdigit((unsigned char)id[i + 2])) {
+                char hex[3] = {id[i + 1], id[i + 2], '\0'};
+                wp.id[o++] = (char)strtol(hex, NULL, 16);
+                i += 2;
+            } else {
+                wp.id[o++] = id[i] == '+' ? ' ' : id[i];
+            }
+        }
+    }
+    switch (waypoint_set(&wp)) {
+    case ESP_OK:
+        return reply(req, HTTPD_200, NULL);
+    case ESP_ERR_INVALID_ARG:
+        return reply(req, HTTPD_400, "Not a position on the globe, or a name NMEA can't carry");
+    default:
+        return reply(req, HTTPD_500, "Couldn't save the destination");
+    }
+}
+
 static esp_err_t bearing_get_handler(httpd_req_t *req)
 {
     bearing_status_t b;
@@ -941,6 +1022,8 @@ esp_err_t webserver_start(void)
         {.uri = "/api/heading", .method = HTTP_POST, .handler = heading_post},
         {.uri = "/api/gnss", .method = HTTP_POST, .handler = gnss_post},
         {.uri = "/api/bearing", .method = HTTP_GET, .handler = bearing_get_handler},
+        {.uri = "/api/waypoint", .method = HTTP_GET, .handler = waypoint_get_handler},
+        {.uri = "/api/waypoint", .method = HTTP_POST, .handler = waypoint_post},
         {.uri = "/api/bearing/log", .method = HTTP_GET, .handler = bearing_log_get},
         {.uri = "/api/bearing", .method = HTTP_POST, .handler = bearing_post},
         {.uri = "/api/ota", .method = HTTP_POST, .handler = ota_post},

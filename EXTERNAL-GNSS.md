@@ -373,6 +373,8 @@ checksum; anything not starting `$PPUCK,` is ignored, as NUS clients expect.
 |---|---|
 | `$PPUCK,WIFI,<SSID hex>,<password hex>*hh` | `$PPUCK,WIFI,OK`, or `$PPUCK,WIFI,ERR,<FORMAT\|INVALID\|FULL\|STORE>` |
 | `$PPUCK,RADIO,WIFI*hh` | `$PPUCK,RADIO,OK`, then a restart on WiFi a second later |
+| `$--WPL,ddmm.mmmm,N,dddmm.mmmm,E,<id>*hh` | `$PPUCK,WPL,OK`, or `$PPUCK,WPL,ERR,<FORMAT\|INVALID\|STORE>` |
+| `$PPUCK,WPL,CLEAR*hh` | `$PPUCK,WPL,OK`, or `$PPUCK,WPL,ERR,STORE` |
 | anything else starting `$PPUCK,` | `$PPUCK,ERR,<CHECKSUM\|UNKNOWN\|BUSY\|MEMORY>` |
 
 Hex, so commas and asterisks in a name or password need no escaping. The
@@ -387,6 +389,34 @@ where it stood, so flipping it either way restarts on whatever it then says.
 
 BLE has no pairing, so anyone in range could add a network or send the puck to WiFi; that is the
 same exposure as the open web page, and the puck never sends a password back.
+
+### Destination: WPL in, RMB and BWC out
+
+Added 2026-09-19, so the Android app can navigate to a place shared from Google
+Maps. The client sets one destination with the standard waypoint sentence,
+`$--WPL` (any talker, checksum required), on the command channel above;
+`$PPUCK,WPL,CLEAR` forgets it. It is kept in NVS (`waypoint.c`, namespace
+`waypoint`), so it outlasts a restart and serves either radio: set over BLE,
+it is also what the TCP clients get on the next boot on WiFi.
+
+While there is a destination and a fix, the outputs get two standard
+sentences toward it, about once a second after the RMC that ends a solution:
+
+| Sentence | Carries |
+|---|---|
+| `$GPRMB,A,,,,<id>,<lat>,N,<lon>,E,<range nm>,<bearing °T>,<closing kn>,<A\|V>,A` | no origin and no cross-track error, since there is no route; closing velocity is speed × cos(course − bearing), negative moving away, empty when the receiver gives no course; arrival `A` within 20 m |
+| `$GPBWC,<utc>,<lat>,N,<lon>,E,<bearing>,T,<bearing>,M,<range>,N,<id>,A` | the magnetic bearing from the WMM declination here (the bearing task's, refreshed once a minute), independent of the magnetometer |
+
+Great circle on a sphere of mean radius, in double. The identifier is at most
+eight printable characters without NMEA's reserved ones, so both sentences stay
+inside 82 characters. Nothing goes out while a fix is withheld as spoofed: the
+distance and bearing would give the position away. RMB and BWC are in
+`CONFIG_RGNSS_NMEA_TYPES` by default; a `sdkconfig` made before this needs them
+added.
+
+A client that only displays the way to a destination can equally work it out
+from RMC itself; the Android app does, and sends WPL so other clients see the
+same destination.
 
 ## 7. Open questions
 

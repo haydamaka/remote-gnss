@@ -121,6 +121,8 @@ home network.
 | `POST /api/cal/start[?fresh=1]` | start a session; it continues from the saved readings unless `fresh=1` |
 | `POST /api/cal/stop` | interrupt a session, keeping what is worth keeping |
 | `POST /api/cal/accept` | save the current fit although it is below the quality bar |
+| `POST /api/waypoint` | `lat`, `lon` (decimal degrees) and an optional `id`, form-encoded: set the destination; or `clear=1` |
+| `GET /api/waypoint` | the destination set over BLE (`set`, `id`, `lat`, `lon`) and, with a fix, the way to it under `nav`: `distance_m`, `bearing_true`, `bearing_mag`, `closing_kn`, `arrived` |
 | `GET /api/bearing` | what driving has taught it, how much it wanders, and why fixes were turned away |
 | `GET /api/bearing/log` | the drive as CSV, a row a minute |
 | `POST /api/bearing` | `learning`, `applying`, `reset` or `save`, form-encoded |
@@ -168,6 +170,31 @@ home network.
   switch. If BLE fails to start, the device restarts into one
   boot on WiFi, whatever the switch; flipping it, or a power cycle, tries BLE
   again.
+- **Navigate to a destination** (added 2026-09-19, for the Android app, which
+  takes a place shared from Google Maps). A client sets one destination with
+  `$--WPL,ddmm.mmmm,N,dddmm.mmmm,E,<id>` on the BLE command channel and forgets
+  it with `$PPUCK,WPL,CLEAR`; answered `$PPUCK,WPL,OK` or
+  `$PPUCK,WPL,ERR,<FORMAT|INVALID|STORE>`. The identifier is up to 8 printable
+  characters. It is kept in NVS, so it survives a restart and serves either
+  radio. While there is a destination and a fix, `$GPRMB` and `$GPBWC` go out
+  about once a second to BLE and TCP: bearing (true, and magnetic from the
+  bearing task's WMM declination), range, closing velocity, arrival within
+  20 m; not while a spoofed fix is withheld. Details in EXTERNAL-GNSS.md,
+  "Destination: WPL in, RMB and BWC out". Not settable over TCP: the TCP server
+  doesn't read what clients send.
+- **Destination tab** on the page (added 2026-09-19): shows the destination
+  (name, position with a map link), the distance, the bearing true and
+  magnetic, the closing speed, and an arrow toward it against the compass
+  heading with how far to turn. It can be set there too (added 2026-09-19): a
+  coordinates field that reads what is typed or pasted in the common forms -
+  decimal degrees; degrees and minutes, or degrees, minutes and seconds, with
+  any of the usual marks (° º ' ′ " ″, d m s) or none; N/S/E/W letters before
+  or after, also Ukrainian (пн/пд/сх/зх); a minus sign; a decimal comma; the
+  two swapped when the first is over 90; Google Maps, OpenStreetMap and geo:
+  links - and says how it read it, or why it can't, before anything is sent.
+  A short maps.app.goo.gl link has no coordinates in it, and the page says so.
+  A name of up to 8 characters, reduced to what NMEA can carry; DEST without
+  one. A Clear button forgets the destination.
 - **Restart button** (added 2026-09-19) on the WiFi/BLE tab, next to the device
   line (`POST /api/restart`). A restart follows the switch: after a boot on
   WiFi against it (`$PPUCK,RADIO,WIFI` over BLE, or a failed BLE start), it goes

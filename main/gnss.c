@@ -17,12 +17,16 @@
 #include "minmea.h"
 #include "nmea_hub.h"
 #include "nvs.h"
+#include "waypoint.h"
 
 #define GNSS_UART UART_NUM_1
 #define UART_RX_BUF_SIZE 2048
 #define NO_DATA_WARN_US (5 * 1000 * 1000)
 #define STATUS_POLL_US (2 * 1000 * 1000)
 #define HEADING_PERIOD_US (500 * 1000)  // $HCHDG/$HCHDT at 2 Hz
+// $GPRMB/$GPBWC about once a second, whatever the receiver's rate: a little
+// under, so a 1 Hz receiver's jitter doesn't halve it.
+#define WAYPOINT_PERIOD_US (900 * 1000)
 #define BAUD_TRY_US (3 * 1000 * 1000)   // long enough for a sentence at any of these rates
 #define RELOCK_US (60 * 1000 * 1000)    // silence this long means the rate was wrong
 #define IMPLAUSIBLE_SPEED_KMH 900.0f  // faster than an airliner: the fix jumped
@@ -459,6 +463,7 @@ static void reader_task(void *arg)
     int64_t last_rx = esp_timer_get_time();
     int64_t last_poll = 0;
     int64_t last_heading = 0;
+    int64_t last_waypoint = 0;
     bool warned = false;
 
     size_t baud_idx = 0;
@@ -573,6 +578,14 @@ static void reader_task(void *arg)
                         publish_with_compass(line, len, speed_kmh);
                     }
                 }
+                // Toward the destination, after the RMC that completes a
+                // solution. Not while the fix is withheld: the distance and
+                // bearing would give the spoofed position away.
+                if (!withhold && len >= 7 && strncmp(line + 3, "RMC,", 4) == 0 &&
+                    now - last_waypoint >= WAYPOINT_PERIOD_US) {
+                    last_waypoint = now;
+                    waypoint_publish(&data);
+                }
                 len = 0;
             } else if (len < sizeof(line) - 1) {
                 line[len++] = c;
@@ -613,6 +626,8 @@ esp_err_t gnss_start(void)
         }
         nvs_close(nvs);
     }
+
+    waypoint_load();
 
     data.latitude = NAN;
     data.longitude = NAN;
