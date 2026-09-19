@@ -306,6 +306,7 @@ static void sample_task(void *arg)
         int64_t now = esp_timer_get_time();
 
         taskENTER_CRITICAL(&lock);
+        data.failing = failing;
         memcpy(data.radio_offset_ut, offset_ut, sizeof(offset_ut));
         data.radio_offset_learned = offset_seen >= OFFSET_LEARNED;
         if (!usable) {

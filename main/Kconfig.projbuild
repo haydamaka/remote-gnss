@@ -134,6 +134,13 @@ menu "Remote GNSS"
                 Needs Bluetooth and NimBLE enabled, which sdkconfig.defaults does.
                 The ESP32-C3 has no Bluetooth Classic, so this is BLE only: no SPP.
 
+        config RGNSS_LED_GPIO
+            int "GPIO of the status LED (lit when low)"
+            range 0 21
+            default 8
+            help
+                The SuperMini's blue LED. See led.h for what it shows.
+
         config RGNSS_RADIO_SWITCH_GPIO
             int "GPIO of the WiFi/BLE switch"
             range 0 21

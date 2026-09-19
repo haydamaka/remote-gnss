@@ -5,6 +5,7 @@
 #include "nvs_flash.h"
 
 #include "gnss.h"
+#include "led.h"
 #include "bearing.h"
 #include "mag_cal.h"
 #include "magnetometer.h"
@@ -86,4 +87,6 @@ void app_main(void)
         }
     }
 #endif
+
+    ESP_ERROR_CHECK_WITHOUT_ABORT(led_start(ble_mode));
 }

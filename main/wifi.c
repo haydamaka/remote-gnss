@@ -65,6 +65,7 @@ static TimerHandle_t fallback_timer;
 // Event loop task only. Joining goes: scan, then try the networks it knows,
 // strongest first, and only when every one has failed wait and scan again.
 static enum { ST_IDLE, ST_SCANNING, ST_CONNECTING, ST_CONNECTED } state;
+static atomic_int ap_clients;  // devices joined to the access point, from its events
 static bool sta_up;  // the station interface exists: STA or AP+STA mode
 static char cands[KNOWN_MAX][33];
 static int8_t cand_rssi[KNOWN_MAX];  // INT8_MIN: not seen in the scan
@@ -424,11 +425,15 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     case WIFI_EVENT_AP_STACONNECTED: {
         wifi_event_ap_staconnected_t *e = data;
         ESP_LOGI(TAG, "client " MACSTR " joined the access point", MAC2STR(e->mac));
+        atomic_fetch_add(&ap_clients, 1);
         break;
     }
     case WIFI_EVENT_AP_STADISCONNECTED: {
         wifi_event_ap_stadisconnected_t *e = data;
         ESP_LOGI(TAG, "client " MACSTR " left the access point", MAC2STR(e->mac));
+        if (atomic_fetch_sub(&ap_clients, 1) <= 0) {
+            atomic_store(&ap_clients, 0);
+        }
         break;
     }
     }
@@ -735,6 +740,11 @@ esp_err_t wifi_scan(wifi_scan_entry_t *out, size_t max, size_t *n)
     }
     *n = got;
     return err;
+}
+
+bool wifi_link_up(void)
+{
+    return state == ST_CONNECTED || (ap_active() && atomic_load(&ap_clients) > 0);
 }
 
 void wifi_get_status(wifi_status_t *out)

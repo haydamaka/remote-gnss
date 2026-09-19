@@ -34,6 +34,17 @@ Wiring:
 A toggle switch between pad 10 and G chooses the radio (see External GNSS
 interfaces).
 
+**Status LED** (added 2026-09-18). The onboard blue LED on GPIO8 shows the
+state in a 2 s cycle: one flash for WiFi, two for Bluetooth; dark between the
+flashes without a GNSS fix, lit with one (the flashes then go dark). Each
+flash is short (100 ms) without a link and long (400 ms) with one (added
+2026-09-19): on WiFi, the station has joined a network or a phone has joined
+the access point; on Bluetooth, a client is connected. While the
+fix looks spoofed it blinks fast (5 Hz) instead; on an error - no magnetometer
+or its reads failing, or the GNSS receiver silent for 3 s - very fast (10 Hz).
+An error shows over spoofing. A task of
+its own drives the LED, every 50 ms.
+
 Pins to leave alone: 2 (strapping pin, must read high at reset), 8 (onboard
 LED), 9 (BOOT button), 20/21 (UART0, serial console).
 

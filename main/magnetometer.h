@@ -11,6 +11,7 @@
 typedef struct {
     const char *chip;     // detected chip, NULL if none was found
     int64_t updated_us;   // esp_timer time of the last sample, 0 if none yet
+    bool failing;         // the last read of the chip failed
     int16_t raw[3];       // X, Y, Z counts
     float field_ut[3];    // X, Y, Z in microtesla
     uint32_t samples_clean;      // from reads with the radio off

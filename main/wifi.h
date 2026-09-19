@@ -39,6 +39,11 @@ typedef struct {
 // connects. Requires NVS, esp_netif and the default event loop first.
 esp_err_t wifi_start(void);
 
+// Whether anything can reach the device over WiFi: the station has joined a
+// network, or a device has joined the access point. Cheap on stack, unlike
+// wifi_get_status(), for the LED task.
+bool wifi_link_up(void);
+
 // Saves a network, or replaces the password of one already saved; no restart
 // needed. ESP_ERR_INVALID_ARG unless the SSID is 1-32 characters and the
 // password empty or 8-63 characters; ESP_ERR_NO_MEM when WIFI_SAVED_MAX other
