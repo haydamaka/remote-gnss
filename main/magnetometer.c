@@ -96,7 +96,9 @@ static uint32_t next_seq = 1;
 // While the radio is powered, the magnetometer reads about 31 uT off along a
 // fixed direction in its own axes, and transmissions push it further. In modem
 // sleep the WiFi driver powers the radio up and down many times a second,
-// through these two calls. They are wrapped at link time (see CMakeLists.txt)
+// through these two calls, and so does the BLE controller in its modem sleep
+// (sdkconfig.defaults), which without it keeps the radio on throughout and
+// leaves no clean read at all. They are wrapped at link time (see CMakeLists.txt)
 // so each read can tell whether the radio stayed off, or on, for all of it.
 static atomic_uint radio_modems;    // esp_phy_modem_t bits currently powered
 static atomic_uint radio_switches;  // bumped on every power-up and power-down

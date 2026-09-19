@@ -243,6 +243,13 @@ trusted. Two independent sources, because either alone can be fooled:
     radio-on reads less the learned offset; with neither, no sample.
   - `GET /api/status` reports under `mag.radio` how many samples came each way
     and the learned offset.
+- Found on 2026-09-19: in BLE mode the controller kept the radio powered the
+  whole time (Bluetooth modem sleep was off), so no read was ever taken with it
+  off and every sample was dropped: no field, no heading, no compass course in
+  the NMEA. Bluetooth modem sleep is now on, with the main crystal as its clock
+  (the board has no 32 kHz one). The controller powers the radio down between
+  radio events through the same `esp_phy_disable` call, and while advertising
+  every read is a radio-off one.
 
 ## Magnetometer calibration
 
