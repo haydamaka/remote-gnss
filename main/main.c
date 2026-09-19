@@ -45,6 +45,9 @@ void app_main(void)
 #endif
     if (!ble_mode) {
         ESP_ERROR_CHECK(wifi_start());
+    } else {
+        // Networks can still be added over BLE, for the next boot on WiFi.
+        ESP_ERROR_CHECK_WITHOUT_ABORT(wifi_load());
     }
 
     // The web page is still useful with a sensor missing, so these aren't fatal.

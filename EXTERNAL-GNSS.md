@@ -363,6 +363,31 @@ silent compass from one pointing north. Both are in the default
 `CONFIG_RGNSS_NMEA_TYPES`, and cost about 60 B/s. No toggle: a client that
 doesn't know them ignores them.
 
+### Commands over BLE
+
+Added 2026-09-19, so the Android app can give the puck a WiFi network while
+it is on BLE. The RX characteristic takes NMEA-style lines with a required
+checksum; anything not starting `$PPUCK,` is ignored, as NUS clients expect.
+
+| Command | Answer on TX |
+|---|---|
+| `$PPUCK,WIFI,<SSID hex>,<password hex>*hh` | `$PPUCK,WIFI,OK`, or `$PPUCK,WIFI,ERR,<FORMAT\|INVALID\|FULL\|STORE>` |
+| `$PPUCK,RADIO,WIFI*hh` | `$PPUCK,RADIO,OK`, then a restart on WiFi a second later |
+| anything else starting `$PPUCK,` | `$PPUCK,ERR,<CHECKSUM\|UNKNOWN\|BUSY\|MEMORY>` |
+
+Hex, so commas and asterisks in a name or password need no escaping. The
+network is saved exactly as from the web page (`wifi_save_station`, up to five)
+and joined on the next boot on WiFi: on BLE the radio is not WiFi's. On a BLE
+boot `wifi_load()` reads the list without starting WiFi, and the command runs in
+a task of its own, because the NimBLE host task's 3 KB stack can't take an NVS
+write. `RADIO,WIFI` reuses the flag that sends a failed BLE start back to WiFi: it is
+kept in RTC memory, so it survives the restart but not a power cycle, and it is
+spent on the boot that reads it. That boot still watches the switch against
+where it stood, so flipping it either way restarts on whatever it then says.
+
+BLE has no pairing, so anyone in range could add a network or send the puck to WiFi; that is the
+same exposure as the open web page, and the puck never sends a password back.
+
 ## 7. Open questions
 
 - **A full ESP32 for Bluetooth Classic?** Not now, and revisit after

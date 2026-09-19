@@ -1,5 +1,7 @@
 #include "nmea_ble.h"
 
+#include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_attr.h"
@@ -16,6 +18,7 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "nmea_hub.h"
+#include "wifi.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -49,6 +52,7 @@
 // on BLE again. RTC_NOINIT_ATTR, not RTC_DATA_ATTR, which is zeroed on every
 // start-up; being uninitialised, only the magic value counts as set.
 #define WIFI_THIS_BOOT_MAGIC 0x57494649u
+#define WIFI_ASKED_MAGIC 0x41534B57u  // the same, asked for over BLE rather than a failure
 static RTC_NOINIT_ATTR uint32_t wifi_this_boot;
 
 static const char *TAG = "nmea_ble";
@@ -73,14 +77,183 @@ static bool synced;         // the host has finished starting; GAP calls work
 static bool enabled;  // BLE has the radio now
 static int boot_level;  // the switch's level when the radio was chosen
 
+// Commands arrive on RX as lines, possibly split over several writes; the
+// longest, WIFI, is about 210 bytes.
+static char rx_line[256];
+static size_t rx_len;
+
+// The answer to the last command, sent ahead of the next batch of sentences.
+// Written by the host task, taken by the pump.
+static portMUX_TYPE reply_lock = portMUX_INITIALIZER_UNLOCKED;
+static char reply[48];
+
 static int gap_event(struct ble_gap_event *event, void *arg);
+
+static void set_reply(const char *body)
+{
+    uint8_t sum = 0;
+    for (const char *p = body; *p; p++) {
+        sum ^= (uint8_t)*p;
+    }
+    char line[sizeof(reply)];
+    snprintf(line, sizeof(line), "$%s*%02X\r\n", body, sum);
+    taskENTER_CRITICAL(&reply_lock);
+    memcpy(reply, line, sizeof(reply));
+    taskEXIT_CRITICAL(&reply_lock);
+}
+
+// Hex to a string of at most max - 1 bytes. False on anything but pairs of hex
+// digits, or a NUL inside.
+static bool unhex(const char *hex, size_t n, char *out, size_t max)
+{
+    if (n % 2 || n / 2 >= max) {
+        return false;
+    }
+    for (size_t i = 0; i < n / 2; i++) {
+        char pair[3] = {hex[2 * i], hex[2 * i + 1], '\0'};
+        char *end;
+        long v = strtol(pair, &end, 16);
+        if (*end != '\0' || v == 0 || !isxdigit((unsigned char)pair[0])) {
+            return false;
+        }
+        out[i] = (char)v;
+    }
+    out[n / 2] = '\0';
+    return true;
+}
+
+// $PPUCK,WIFI,<SSID in hex>,<password in hex>*hh saves a network for the next
+// boot on WiFi, as the web page would; answered with $PPUCK,WIFI,OK or
+// $PPUCK,WIFI,ERR,<why>. Hex, so that commas and asterisks in either need no
+// escaping. The checksum is required: a truncated write must not save half a
+// password.
+static void run_command(char *line)
+{
+    char *star = strrchr(line, '*');
+    if (star == NULL) {
+        set_reply("PPUCK,ERR,CHECKSUM");
+        return;
+    }
+    uint8_t sum = 0;
+    for (const char *p = line + 1; p < star; p++) {
+        sum ^= (uint8_t)*p;
+    }
+    if (strtol(star + 1, NULL, 16) != sum) {
+        set_reply("PPUCK,ERR,CHECKSUM");
+        return;
+    }
+    *star = '\0';
+
+    const char *args = line + 7;
+    if (strcmp(args, "RADIO,WIFI") == 0) {
+        // Answer first and give the pump time to send it: the restart takes
+        // the connection with it.
+        set_reply("PPUCK,RADIO,OK");
+        ESP_LOGI(TAG, "%s asked for WiFi; restarting on it for one boot", peer);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        wifi_this_boot = WIFI_ASKED_MAGIC;
+        esp_restart();
+    }
+    if (strncmp(args, "WIFI,", 5) != 0) {
+        set_reply("PPUCK,ERR,UNKNOWN");
+        return;
+    }
+    const char *ssid_hex = args + 5;
+    const char *comma = strchr(ssid_hex, ',');
+    char ssid[33], pass[64];
+    if (comma == NULL || !unhex(ssid_hex, (size_t)(comma - ssid_hex), ssid, sizeof(ssid)) ||
+        !unhex(comma + 1, strlen(comma + 1), pass, sizeof(pass))) {
+        set_reply("PPUCK,WIFI,ERR,FORMAT");
+        return;
+    }
+    esp_err_t err = wifi_save_station(ssid, pass);
+    memset(pass, 0, sizeof(pass));
+    switch (err) {
+    case ESP_OK:
+        ESP_LOGI(TAG, "%s saved WiFi network \"%s\"", peer, ssid);
+        set_reply("PPUCK,WIFI,OK");
+        break;
+    case ESP_ERR_INVALID_ARG:
+        set_reply("PPUCK,WIFI,ERR,INVALID");
+        break;
+    case ESP_ERR_NO_MEM:
+        set_reply("PPUCK,WIFI,ERR,FULL");
+        break;
+    default:
+        set_reply("PPUCK,WIFI,ERR,STORE");
+        break;
+    }
+}
+
+// A command runs in a task of its own: saving a network writes NVS and copies
+// the list on the stack, more than the host task's 3 KB can spare. One at a
+// time; the line is the task's to free.
+static volatile bool command_busy;
+
+static void command_task(void *arg)
+{
+    char *line = arg;
+    run_command(line);
+    memset(line, 0, strlen(line));  // it held a password
+    free(line);
+    command_busy = false;
+    vTaskDelete(NULL);
+}
+
+static void start_command(const char *line)
+{
+    if (command_busy) {
+        set_reply("PPUCK,ERR,BUSY");
+        return;
+    }
+    char *copy = strdup(line);
+    if (copy == NULL) {
+        set_reply("PPUCK,ERR,MEMORY");
+        return;
+    }
+    command_busy = true;
+    if (xTaskCreate(command_task, "ble_cmd", 4096, copy, 4, NULL) != pdPASS) {
+        command_busy = false;
+        memset(copy, 0, strlen(copy));
+        free(copy);
+        set_reply("PPUCK,ERR,MEMORY");
+    }
+}
 
 static int rx_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
-    // Nothing reads or writes anything meaningful yet. The RX characteristic
-    // exists because clients expect the pair, and it is where UBX commands
-    // from the client would arrive in a later phase.
-    return ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR ? 0 : BLE_ATT_ERR_UNLIKELY;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    // Runs on the host task, which is also the only one that touches rx_line.
+    uint8_t chunk[64];
+    uint16_t total = OS_MBUF_PKTLEN(ctxt->om);
+    for (uint16_t off = 0; off < total;) {
+        uint16_t n = total - off < sizeof(chunk) ? total - off : sizeof(chunk);
+        if (os_mbuf_copydata(ctxt->om, off, n, chunk) != 0) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        off += n;
+        for (uint16_t i = 0; i < n; i++) {
+            char c = (char)chunk[i];
+            if (c == '\n') {
+                while (rx_len > 0 && rx_line[rx_len - 1] == '\r') {
+                    rx_len--;
+                }
+                rx_line[rx_len] = '\0';
+                if (strncmp(rx_line, "$PPUCK,", 7) == 0) {
+                    start_command(rx_line);
+                }
+                memset(rx_line, 0, sizeof(rx_line));  // it may have held a password
+                rx_len = 0;
+            } else if (rx_len < sizeof(rx_line) - 1) {
+                rx_line[rx_len++] = c;
+            } else {
+                rx_len = 0;  // no command is this long; drop it and resync on the next line
+            }
+        }
+    }
+    return 0;
 }
 
 static int tx_access(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -207,6 +380,11 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(TAG, "%s disconnected (reason %d)", peer, event->disconnect.reason);
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         subscribed = false;
+        rx_len = 0;
+        // An answer that never went out belongs to this client, not the next.
+        taskENTER_CRITICAL(&reply_lock);
+        reply[0] = '\0';
+        taskEXIT_CRITICAL(&reply_lock);
         peer[0] = '\0';
         sync_advertising();
         // Not advertise(): the station has very likely been knocked off the
@@ -311,7 +489,15 @@ static void pump_task(void *arg)
         }
 
         if (off == len) {
-            len = fill(tx, sizeof(tx));
+            // A command's answer goes out first, on its own.
+            taskENTER_CRITICAL(&reply_lock);
+            memcpy(tx, reply, sizeof(reply));
+            reply[0] = '\0';
+            taskEXIT_CRITICAL(&reply_lock);
+            len = strlen(tx);
+            if (len == 0) {
+                len = fill(tx, sizeof(tx));
+            }
             off = 0;
             if (len == 0) {
                 continue;
@@ -420,6 +606,10 @@ bool nmea_ble_boot_mode(void)
     wifi_this_boot = 0;
     if (forced == WIFI_THIS_BOOT_MAGIC) {
         ESP_LOGW(TAG, "BLE failed to start last time: WiFi gets this boot");
+        return false;
+    }
+    if (forced == WIFI_ASKED_MAGIC) {
+        ESP_LOGW(TAG, "WiFi asked for over BLE: WiFi gets this boot, until the switch moves");
         return false;
     }
     return boot_level != 0;

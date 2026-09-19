@@ -44,6 +44,10 @@ esp_err_t wifi_start(void);
 // wifi_get_status(), for the LED task.
 bool wifi_link_up(void);
 
+// Loads the saved networks without starting WiFi, so that wifi_save_station()
+// works on a boot that gave the radio to BLE. wifi_start() does this itself.
+esp_err_t wifi_load(void);
+
 // Saves a network, or replaces the password of one already saved; no restart
 // needed. ESP_ERR_INVALID_ARG unless the SSID is 1-32 characters and the
 // password empty or 8-63 characters; ESP_ERR_NO_MEM when WIFI_SAVED_MAX other

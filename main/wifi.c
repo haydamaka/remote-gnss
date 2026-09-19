@@ -532,13 +532,23 @@ static void fallback_timer_cb(TimerHandle_t timer)
     esp_event_post(RGNSS_WIFI_EVENT, EV_FALLBACK, NULL, 0, 0);
 }
 
+esp_err_t wifi_load(void)
+{
+    if (list_lock) {
+        return ESP_OK;
+    }
+    list_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(list_lock, ESP_ERR_NO_MEM, TAG, "create list lock");
+    load_saved();
+    return ESP_OK;
+}
+
 esp_err_t wifi_start(void)
 {
-    list_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_ERROR(wifi_load(), TAG, "load saved networks");
     scan_lock = xSemaphoreCreateMutex();
     scan_done = xSemaphoreCreateBinary();
-    ESP_RETURN_ON_FALSE(list_lock && scan_lock && scan_done, ESP_ERR_NO_MEM, TAG, "create locks");
-    load_saved();
+    ESP_RETURN_ON_FALSE(scan_lock && scan_done, ESP_ERR_NO_MEM, TAG, "create locks");
 
     esp_netif_create_default_wifi_ap();
     sta_netif = esp_netif_create_default_wifi_sta();
