@@ -127,7 +127,7 @@ home network.
 | `GET /api/bearing/log` | the drive as CSV, a row a minute |
 | `POST /api/bearing` | `learning`, `applying`, `reset` or `save`, form-encoded |
 | `POST /api/heading` | `offset` in degrees, form-encoded: the correction added to the measured heading |
-| `POST /api/gnss` | `withhold_spoofed=0\|1`, form-encoded: whether a fix that looks spoofed is kept from TCP and Bluetooth; `/api/status` reports it under `gnss`, with `withholding` when it is happening |
+| `POST /api/gnss` | form-encoded, any of: `withhold_spoofed=0\|1`, whether a fix that looks spoofed is kept from TCP and Bluetooth (`/api/status` reports it under `gnss`, with `withholding` when it is happening); `filter_speed=0\|1`, `motion=none\|walking\|vehicle\|both` (reported under `gnss` with `receiver_config`: `pending`, `ok`, `rejected` or `unsent`) |
 | `POST /api/cal/points` | replace the buffered readings with a CSV (`x,y,z` or `seq,t_ms,x,y,z`) |
 | `GET /api/wifi` | the saved networks by name (never their passwords), how many can be saved, and the built-in one's name |
 | `POST /api/wifi` | `ssid` and `password`, form-encoded: save a network, or replace its password; no restart |
@@ -195,6 +195,30 @@ home network.
   A short maps.app.goo.gl link has no coordinates in it, and the page says so.
   A name of up to 8 characters, reduced to what NMEA can carry; DEST without
   one. A Clear button forgets the destination.
+- **Speed at rest** (added 2026-09-19). The receiver measures speed from
+  Doppler; at rest its noise is a small vector in a random direction, so the
+  speed never reaches 0 and the course spins. Under GNSS config on the page,
+  kept in NVS:
+  - *Speed measuring profile*: not set, walking, in a vehicle, or both. Sets the
+    receiver's dynamic model (pedestrian, automotive, portable); not set leaves
+    the receiver's own.
+  - *Filter speed jitter* (one checkbox for both ends, on by default):
+    - the receiver's static hold (UBX-CFG-VALSET, CFG-MOT-GNSSSPEED_THRS /
+      GNSSDIST_THRS: 0.25 m/s and 3 m walking, 0.5 m/s and 10 m in a vehicle,
+      0.3 m/s and 5 m otherwise), sent to the receiver's RAM whenever it is
+      found, so again after it loses power; the page says whether it
+      acknowledged;
+    - below 2 m/s the firmware smooths the velocity vector (1 s time
+      constant), not the speed, so the noise averages to 0; stopped within
+      twice the receiver's own speed accuracy (UBX-NAV-PVT sAcc, polled once a
+      second; 0.1-0.4 m/s), moving again 0.1 m/s above that. RMC and VTG carry
+      the speed. The course is not filtered - below 5 km/h the compass replaces
+      it (CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH, not on the page) - and goes empty
+      while stopped.
+  The page, the compass-course threshold and the destination's closing speed
+  use the same speed; the bearing learning keeps the receiver's. Speed and
+  course are cleared when the receiver loses the fix, rather than kept from
+  the last one.
 - **Restart button** (added 2026-09-19) on the WiFi/BLE tab, next to the device
   line (`POST /api/restart`). A restart follows the switch: after a boot on
   WiFi against it (`$PPUCK,RADIO,WIFI` over BLE, or a failed BLE start), it goes

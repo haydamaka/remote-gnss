@@ -51,7 +51,7 @@
   .check { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; font-size: 15px; }
   .check input { margin: 0; }
   label { display: block; margin: 12px 0 4px; color: var(--muted); }
-  input {
+  input, select {
     width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 8px;
     background: var(--bg); color: var(--fg); font: inherit;
   }
@@ -185,9 +185,19 @@
         <tr><th>Course</th><td id="course">—</td></tr>
         <tr><th>Time</th><td id="utc">—</td></tr>
       </table>
+      <h2>GNSS config</h2>
       <label class="check"><input type="checkbox" id="no-spoofed"> Don't send positions that look spoofed</label>
       <p class="note" id="no-spoofed-note">While the signals look faked, and for a minute after, TCP and Bluetooth
         clients get &ldquo;no fix&rdquo; instead of the position and time.</p>
+      <label for="motion">Speed measuring profile</label>
+      <select id="motion">
+        <option value="none">Not set (the receiver's own model)</option>
+        <option value="walking">Walking</option>
+        <option value="vehicle">In a vehicle</option>
+        <option value="both">Both</option>
+      </select>
+      <label class="check"><input type="checkbox" id="filter-speed"> Filter speed jitter</label>
+      <p class="note" id="motion-note"></p>
     </section>
     <section>
       <h2>Magnetometer</h2>
@@ -469,7 +479,38 @@ function renderGnss(g) {
   $('no-spoofed-note').textContent = g.withholding
     ? 'Withholding the position now: TCP and Bluetooth clients are getting "no fix".'
     : 'While the signals look faked, and for a minute after, TCP and Bluetooth clients get "no fix" instead of the position and time.';
+  renderMotion(g);
 }
+
+// The motion settings in GNSS config. Each change goes out on its own; a status reply sent
+// before it would put the controls back, so they're left alone for a moment.
+function renderMotion(g) {
+  if (Date.now() > view.motionHeld) {
+    $('motion').value = g.motion || 'none';
+    $('filter-speed').checked = !!g.filter_speed;
+  }
+  const RECEIVER = {pending: 'Sending it to the receiver…', rejected: "The receiver refused it.",
+                    unsent: "The receiver didn't answer.", ok: ''};
+  const said = RECEIVER[g.receiver_config] || '';
+  const acc = g.speed_acc_kmh != null ? `Speed accuracy ±${g.speed_acc_kmh.toFixed(2)} km/h.` : '';
+  $('motion-note').textContent = [said, acc].filter(Boolean).join(' ');
+}
+
+async function saveMotion(body) {
+  view.motionHeld = Date.now() + 3000;
+  for (const el of [$('motion'), $('filter-speed')]) el.disabled = true;
+  try {
+    const r = await fetch('/api/gnss', {method: 'POST', body, signal: AbortSignal.timeout(5000)});
+    if (!r.ok) throw new Error();
+  } catch {
+    view.motionHeld = 0;  // the next status puts the controls back as the device has them
+    $('motion-note').textContent = "Couldn't save that; the device didn't take it.";
+  } finally {
+    for (const el of [$('motion'), $('filter-speed')]) el.disabled = false;
+  }
+}
+$('motion').onchange = () => saveMotion(`motion=${$('motion').value}`);
+$('filter-speed').onchange = () => saveMotion(`filter_speed=${$('filter-speed').checked ? 1 : 0}`);
 
 $('no-spoofed').onchange = async () => {
   const box = $('no-spoofed');
@@ -994,7 +1035,7 @@ $('wifi-form').onsubmit = async e => {
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its
 // readings as dots and the current field as an arrow from the fitted centre.
-const view = {noSpoofedHeld: 0, cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
+const view = {noSpoofedHeld: 0, motionHeld: 0, cal: null, points: [], pointsSeq: -1, coef: null, calErrorUntil: 0, bearingTimer: 0, target: null, live: null, since: 0, skip: true, calTimer: 0, calError: '', radius: 0,
               fg: '', muted: '', mode: 'compass', lastState: '', heading: null, headingTarget: null, headingRaw: null, headingAt: 0, offset: 0, offsetHeld: 0, northMsg: '', northMsgUntil: 0, autoAdjust: false,
               yaw: 0.8, pitch: 0.45, drag: null, animating: false};
 const CARDINALS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];

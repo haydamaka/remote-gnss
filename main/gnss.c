@@ -23,6 +23,19 @@
 #define UART_RX_BUF_SIZE 2048
 #define NO_DATA_WARN_US (5 * 1000 * 1000)
 #define STATUS_POLL_US (2 * 1000 * 1000)
+#define PVT_POLL_US (1000 * 1000)      // UBX-NAV-PVT, for the receiver's speed accuracy
+#define SACC_STALE_US (3 * 1000 * 1000)
+#define CFG_ANSWER_US (2 * 1000 * 1000)  // a VALSET unanswered this long is sent again
+#define CFG_TRIES 3
+// Speed smoothing (smooth_speed() below). Doppler speed above SMOOTH_BELOW_MPS
+// is left as it is; below it the velocity vector is smoothed with a 1 s time
+// constant. Stopped below 2 x the receiver's speed accuracy, held between the
+// two limits, and moving again 0.1 m/s above that.
+#define SMOOTH_BELOW_MPS 2.0f
+#define SMOOTH_TAU_S 1.0f
+#define STOP_MIN_MPS 0.1f
+#define STOP_MAX_MPS 0.4f
+#define STOP_HYSTERESIS_MPS 0.1f
 #define HEADING_PERIOD_US (500 * 1000)  // $HCHDG/$HCHDT at 2 Hz
 // $GPRMB/$GPBWC about once a second, whatever the receiver's rate: a little
 // under, so a 1 Hz receiver's jitter doesn't halve it.
@@ -37,6 +50,8 @@
 #define WITHHOLD_HOLD_US (60 * 1000 * 1000)
 #define NVS_NAMESPACE "gnss"
 #define NVS_KEY_WITHHOLD "no_spoofed"
+#define NVS_KEY_FILTER "filter_spd"
+#define NVS_KEY_MOTION "motion"
 
 static const char *TAG = "gnss";
 
@@ -52,6 +67,12 @@ static portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 static gnss_data_t data;
 
 static volatile bool withhold_spoofed = true;
+
+// Written by the web server, read by the reader task; each field is one word.
+static gnss_settings_t settings = {.filter_speed = true, .motion = GNSS_MOTION_NONE};
+static volatile bool cfg_dirty = true;  // the receiver hasn't been sent the settings since they changed
+static volatile gnss_cfg_state_t cfg_state = GNSS_CFG_UNSENT;
+static int64_t sacc_us;                 // when speed_acc_kmh was last set
 
 // NMEA ddmm.mmmm to signed decimal degrees. Done in double: float would round
 // away the last metre or so.
@@ -113,11 +134,66 @@ static int64_t to_epoch(int y, int m, int d)
 // clock drifting against network time would look exactly like a spoof.
 static int64_t utc_epoch, utc_epoch_us;
 
+static float rad(float deg)
+{
+    return deg * (float)M_PI / 180.0f;
+}
+
+// The receiver measures velocity from Doppler, so it is good while moving; at
+// rest its noise is a small vector in a random direction, and the speed, being
+// its length, never averages to 0. So this smooths the vector rather than the
+// speed, which does, and calls it stopped once that is within twice the
+// receiver's own speed accuracy estimate (clamped to STOP_MIN/MAX_MPS).
+static void smooth_speed(float speed_kmh, float course, int64_t now, float *out_kmh, float *out_course)
+{
+    static float vn, ve;
+    static int64_t last_us;
+    static bool stopped;
+    float v = isfinite(speed_kmh) ? speed_kmh / 3.6f : 0.0f;
+    float rn, re;
+    if (isfinite(course)) {
+        rn = v * cosf(rad(course));
+        re = v * sinf(rad(course));
+    } else {
+        // No course: the receiver couldn't tell a direction. Keep the last one.
+        float h = hypotf(vn, ve);
+        rn = h > 0.01f ? vn / h * v : 0.0f;
+        re = h > 0.01f ? ve / h * v : 0.0f;
+    }
+    float dt = last_us ? (now - last_us) / 1e6f : 10.0f;
+    last_us = now;
+    if (v >= SMOOTH_BELOW_MPS || dt > 3.0f) {
+        vn = rn;
+        ve = re;
+    } else {
+        float a = 1.0f - expf(-dt / SMOOTH_TAU_S);
+        vn += a * (rn - vn);
+        ve += a * (re - ve);
+    }
+    float s = hypotf(vn, ve);
+
+    float acc = sacc_us && now - sacc_us < SACC_STALE_US ? data.speed_acc_kmh / 3.6f : NAN;
+    float enter = isfinite(acc) ? fminf(fmaxf(2.0f * acc, STOP_MIN_MPS), STOP_MAX_MPS) : STOP_MIN_MPS;
+    if (stopped ? s > enter + STOP_HYSTERESIS_MPS : s < enter) {
+        stopped = !stopped;
+    }
+    *out_kmh = stopped ? 0.0f : s * 3.6f;
+    *out_course = stopped ? NAN : fmodf(atan2f(ve, vn) * 180.0f / (float)M_PI + 360.0f, 360.0f);
+}
+
 static void handle_rmc(const char *line)
 {
     struct minmea_sentence_rmc f;
-    // An invalid RMC can still carry stale time and speed, so ignore it.
-    if (!minmea_parse_rmc(&f, line) || !f.valid) {
+    if (!minmea_parse_rmc(&f, line)) {
+        return;
+    }
+    // An invalid RMC can still carry stale time and speed, so ignore it - but
+    // the motion from the last fix is no longer true either.
+    if (!f.valid) {
+        taskENTER_CRITICAL(&lock);
+        data.speed_kmh = data.course_deg = NAN;
+        data.speed_out_kmh = data.course_out_deg = NAN;
+        taskEXIT_CRITICAL(&lock);
         return;
     }
     float speed_kmh = minmea_tofloat(&f.speed) * 1.852f;
@@ -146,16 +222,86 @@ static void handle_rmc(const char *line)
     data.course_deg = course;
     memcpy(data.utc, utc, sizeof(utc));
     taskEXIT_CRITICAL(&lock);
+
+    float out_kmh = speed_kmh, out_course = course;
+    if (settings.filter_speed) {
+        // The course isn't filtered: below the compass-course speed it is
+        // replaced anyway. It goes when the filter says stopped.
+        float smoothed_course;
+        smooth_speed(speed_kmh, course, now, &out_kmh, &smoothed_course);
+        out_course = out_kmh == 0.0f ? NAN : course;
+    }
+    taskENTER_CRITICAL(&lock);
+    data.speed_out_kmh = out_kmh;
+    data.course_out_deg = out_course;
+    taskEXIT_CRITICAL(&lock);
 }
 
 // The receiver answers a poll for UBX-NAV-STATUS with its spoofing verdict.
 // Polling needs no configuration, so nothing about the receiver is changed.
 static const uint8_t POLL_NAV_STATUS[] = {0xB5, 0x62, 0x01, 0x03, 0x00, 0x00, 0x04, 0x0D};
+// UBX-NAV-PVT, polled for sAcc, the receiver's estimate of its speed error.
+static const uint8_t POLL_NAV_PVT[] = {0xB5, 0x62, 0x01, 0x07, 0x00, 0x00, 0x08, 0x19};
+
+// UBX-CFG-VALSET keys (u-blox M10 interface description).
+#define KEY_NAVSPG_DYNMODEL 0x20110021u   // E1: 0 portable, 3 pedestrian, 4 automotive
+#define KEY_MOT_GNSSSPEED_THRS 0x20250038u  // U1, cm/s: static hold below this speed; 0 off
+#define KEY_MOT_GNSSDIST_THRS 0x3025003Bu   // U2, m: static hold left beyond this distance
+
+static size_t put_key(uint8_t *p, uint32_t key, uint32_t value, int bytes)
+{
+    for (int i = 0; i < 4; i++) {
+        p[i] = (uint8_t)(key >> (8 * i));
+    }
+    for (int i = 0; i < bytes; i++) {
+        p[4 + i] = (uint8_t)(value >> (8 * i));
+    }
+    return 4 + (size_t)bytes;
+}
+
+// The dynamic model and the static hold thresholds for the settings, to the
+// receiver's RAM layer: it forgets them when its power goes, and they are sent
+// again every time the reader finds it.
+static void send_receiver_config(void)
+{
+    static bool model_sent;  // since this boot; the receiver keeps RAM across ours
+    gnss_settings_t s = settings;
+    static const uint8_t models[] = {[GNSS_MOTION_WALKING] = 3, [GNSS_MOTION_VEHICLE] = 4, [GNSS_MOTION_BOTH] = 0};
+    static const uint8_t speed_cms[] = {[GNSS_MOTION_NONE] = 30, [GNSS_MOTION_WALKING] = 25,
+                                        [GNSS_MOTION_VEHICLE] = 50, [GNSS_MOTION_BOTH] = 30};
+    static const uint16_t dist_m[] = {[GNSS_MOTION_NONE] = 5, [GNSS_MOTION_WALKING] = 3,
+                                      [GNSS_MOTION_VEHICLE] = 10, [GNSS_MOTION_BOTH] = 5};
+
+    uint8_t msg[6 + 4 + 3 * 8 + 2] = {0xB5, 0x62, 0x06, 0x8A};
+    size_t n = 6;
+    msg[n++] = 0x00;  // version
+    msg[n++] = 0x01;  // RAM layer
+    msg[n++] = 0x00;
+    msg[n++] = 0x00;
+    if (s.motion != GNSS_MOTION_NONE) {
+        n += put_key(msg + n, KEY_NAVSPG_DYNMODEL, models[s.motion], 1);
+        model_sent = true;
+    } else if (model_sent) {
+        n += put_key(msg + n, KEY_NAVSPG_DYNMODEL, 0, 1);  // back to the receiver's default, portable
+    }
+    n += put_key(msg + n, KEY_MOT_GNSSSPEED_THRS, s.filter_speed ? speed_cms[s.motion] : 0, 1);
+    n += put_key(msg + n, KEY_MOT_GNSSDIST_THRS, s.filter_speed ? dist_m[s.motion] : 0, 2);
+    msg[4] = (uint8_t)(n - 6);
+    msg[5] = 0;
+    uint8_t a = 0, b = 0;
+    for (size_t i = 2; i < n; i++) {
+        a += msg[i];
+        b += a;
+    }
+    msg[n++] = a;
+    msg[n++] = b;
+    uart_write_bytes(GNSS_UART, msg, n);
+}
 
 // Feeds one byte to the UBX side of the stream. NMEA and UBX share the wire.
 static void feed_ubx(uint8_t b)
 {
-    static uint8_t buf[24];
+    static uint8_t buf[72];  // NAV-PVT's sAcc ends at byte 72
     static uint16_t len, got;
     static uint8_t step, cls, id, ck_a, ck_b;
 
@@ -181,6 +327,22 @@ static void feed_ubx(uint8_t b)
         step = b == ck_a ? 8 : 0;
         return;
     case 8:
+        if (b == ck_b && cls == 0x01 && id == 0x07 && len >= 72) {
+            // flags (byte 21) bit 0 is gnssFixOK; sAcc is bytes 68-71, mm/s.
+            uint32_t sacc = buf[68] | buf[69] << 8 | buf[70] << 16 | (uint32_t)buf[71] << 24;
+            float kmh = (buf[21] & 0x01) ? sacc * 0.0036f : NAN;
+            taskENTER_CRITICAL(&lock);
+            data.speed_acc_kmh = kmh;
+            taskEXIT_CRITICAL(&lock);
+            sacc_us = esp_timer_get_time();
+        } else if (b == ck_b && cls == 0x05 && len >= 2 && buf[0] == 0x06 && buf[1] == 0x8A) {
+            cfg_state = id == 0x01 ? GNSS_CFG_OK : GNSS_CFG_REJECTED;
+            if (id == 0x01) {
+                ESP_LOGI(TAG, "receiver took the motion settings");
+            } else {
+                ESP_LOGW(TAG, "receiver refused the motion settings");
+            }
+        }
         if (b == ck_b && cls == 0x01 && id == 0x03 && len >= 8) {
             // flags2 is byte 7; bits 3-4 hold the spoofing state.
             uint8_t spoof = (buf[7] >> 3) & 0x03;
@@ -357,16 +519,27 @@ static size_t rebuild(char *out, size_t size, char *const *fields, int n)
     return w == 3 ? len + 3 : 0;
 }
 
-// Below CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH the course over ground is noise, so
-// RMC and VTG go out with the compass heading in its place. Only with a fix:
-// a sentence saying "no fix" stays as it is. Publishes the sentence either way.
-static void publish_with_compass(const char *line, size_t len, float speed_kmh)
+// RMC and VTG go out carrying the motion as the settings want it. With speed
+// smoothing on, the smoothed speed and course (no course when stopped). Below
+// CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH the course over ground is noise, so the
+// compass heading goes in its place. Only with a fix: a sentence saying "no
+// fix" stays as it is. Publishes the sentence either way.
+static void publish_motion(const char *line, size_t len)
 {
     bool rmc = strncmp(line + 3, "RMC,", 4) == 0, vtg = strncmp(line + 3, "VTG,", 4) == 0;
+    if (!(rmc || vtg)) {
+        nmea_hub_publish(line, len);
+        return;
+    }
+    taskENTER_CRITICAL(&lock);
+    float speed = data.speed_out_kmh, course = data.course_out_deg;
+    taskEXIT_CRITICAL(&lock);
+    bool smooth = settings.filter_speed;
     float true_deg, mag_deg;
-    if (CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH == 0 || !(rmc || vtg) ||
-        (isfinite(speed_kmh) && speed_kmh >= CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH) ||
-        !bearing_heading(&true_deg, &mag_deg)) {
+    bool compass = CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH != 0 &&
+                   !(isfinite(speed) && speed >= CONFIG_RGNSS_NMEA_COMPASS_BELOW_KMH) &&
+                   bearing_heading(&true_deg, &mag_deg);
+    if (!smooth && !compass) {
         nmea_hub_publish(line, len);
         return;
     }
@@ -393,16 +566,35 @@ static void publish_with_compass(const char *line, size_t len, float speed_kmh)
     }
 
     // Rounded here, so 359.97 goes out as 0.0 rather than 360.0.
-    char t[8], m[8];
-    snprintf(t, sizeof(t), "%.1f", fmodf(roundf(true_deg * 10.0f) / 10.0f, 360.0f));
-    snprintf(m, sizeof(m), "%.1f", fmodf(roundf(mag_deg * 10.0f) / 10.0f, 360.0f));
+    char t[8] = "", m[8] = "", kn[12] = "", kmh[12] = "";
+    if (compass) {
+        snprintf(t, sizeof(t), "%.1f", fmodf(roundf(true_deg * 10.0f) / 10.0f, 360.0f));
+        snprintf(m, sizeof(m), "%.1f", fmodf(roundf(mag_deg * 10.0f) / 10.0f, 360.0f));
+    } else if (isfinite(course)) {
+        snprintf(t, sizeof(t), "%.1f", fmodf(roundf(course * 10.0f) / 10.0f, 360.0f));
+    }
+    if (isfinite(speed)) {
+        snprintf(kn, sizeof(kn), "%.3f", speed / 1.852f);
+        snprintf(kmh, sizeof(kmh), "%.3f", speed);
+    }
     if (rmc && n >= 9 && strcmp(fields[2], "A") == 0) {
         fields[8] = t;
+        if (smooth) {
+            fields[7] = kn;
+        }
     } else if (vtg && n >= 10 && fields[9][0] && strcmp(fields[9], "N") != 0) {
         fields[1] = t;
         fields[2] = "T";
-        fields[3] = m;
-        fields[4] = "M";
+        if (compass) {
+            fields[3] = m;
+            fields[4] = "M";
+        }
+        if (smooth) {
+            fields[5] = kn;
+            fields[6] = "N";
+            fields[7] = kmh;
+            fields[8] = "K";
+        }
     } else {
         nmea_hub_publish(line, len);
         return;
@@ -462,6 +654,9 @@ static void reader_task(void *arg)
     uint8_t buf[128];
     int64_t last_rx = esp_timer_get_time();
     int64_t last_poll = 0;
+    int64_t last_pvt = 0;
+    int64_t cfg_sent_us = 0;
+    int cfg_tries = 0;
     int64_t last_heading = 0;
     int64_t last_waypoint = 0;
     bool warned = false;
@@ -477,6 +672,7 @@ static void reader_task(void *arg)
         if (!locked) {
             if (checksummed > 0) {
                 locked = true;
+                cfg_dirty = true;  // a receiver found afresh may have been power cycled
                 ESP_LOGI(TAG, "receiver found at %d baud", data.baud);
             } else if (esp_timer_get_time() - baud_since > BAUD_TRY_US) {
                 baud_idx = (baud_idx + 1) % (sizeof(BAUDS) / sizeof(BAUDS[0]));
@@ -499,6 +695,25 @@ static void reader_task(void *arg)
         if (esp_timer_get_time() - last_heading > HEADING_PERIOD_US) {
             last_heading = esp_timer_get_time();
             publish_heading(data.withholding);
+        }
+        if (locked && esp_timer_get_time() - last_pvt > PVT_POLL_US) {
+            last_pvt = esp_timer_get_time();
+            uart_write_bytes(GNSS_UART, POLL_NAV_PVT, sizeof(POLL_NAV_PVT));
+        }
+        // The motion settings, until the receiver answers; a few tries.
+        if (locked && cfg_dirty) {
+            cfg_dirty = false;
+            cfg_tries = 0;
+            cfg_state = GNSS_CFG_PENDING;
+        }
+        if (locked && cfg_state == GNSS_CFG_PENDING && esp_timer_get_time() - cfg_sent_us > CFG_ANSWER_US) {
+            if (cfg_tries++ < CFG_TRIES) {
+                cfg_sent_us = esp_timer_get_time();
+                send_receiver_config();
+            } else {
+                cfg_state = GNSS_CFG_UNSENT;
+                ESP_LOGW(TAG, "receiver never answered the motion settings");
+            }
         }
         if (esp_timer_get_time() - last_poll > STATUS_POLL_US) {
             last_poll = esp_timer_get_time();
@@ -572,10 +787,7 @@ static void reader_task(void *arg)
                     if (withhold) {
                         publish_withheld(line, len);
                     } else {
-                        taskENTER_CRITICAL(&lock);
-                        float speed_kmh = data.speed_kmh;
-                        taskEXIT_CRITICAL(&lock);
-                        publish_with_compass(line, len, speed_kmh);
+                        publish_motion(line, len);
                     }
                 }
                 // Toward the destination, after the RMC that completes a
@@ -616,6 +828,32 @@ esp_err_t gnss_set_withhold_spoofed(bool on)
     return ESP_OK;
 }
 
+void gnss_get_settings(gnss_settings_t *out, gnss_cfg_state_t *state)
+{
+    *out = settings;
+    *state = cfg_state;
+}
+
+esp_err_t gnss_set_settings(const gnss_settings_t *s)
+{
+    ESP_RETURN_ON_FALSE(s->motion <= GNSS_MOTION_BOTH, ESP_ERR_INVALID_ARG, TAG, "motion");
+    nvs_handle_t nvs;
+    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "open NVS");
+    esp_err_t err = nvs_set_u8(nvs, NVS_KEY_FILTER, s->filter_speed);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(nvs, NVS_KEY_MOTION, (uint8_t)s->motion);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    nvs_close(nvs);
+    ESP_RETURN_ON_ERROR(err, TAG, "save the motion settings");
+    settings = *s;
+    cfg_dirty = true;
+    ESP_LOGI(TAG, "speed filter %s, profile %d", s->filter_speed ? "on" : "off", s->motion);
+    return ESP_OK;
+}
+
 esp_err_t gnss_start(void)
 {
     nvs_handle_t nvs;
@@ -623,6 +861,12 @@ esp_err_t gnss_start(void)
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
         if (nvs_get_u8(nvs, NVS_KEY_WITHHOLD, &on) == ESP_OK) {
             withhold_spoofed = on != 0;
+        }
+        if (nvs_get_u8(nvs, NVS_KEY_FILTER, &on) == ESP_OK) {
+            settings.filter_speed = on != 0;
+        }
+        if (nvs_get_u8(nvs, NVS_KEY_MOTION, &on) == ESP_OK && on <= GNSS_MOTION_BOTH) {
+            settings.motion = (gnss_motion_t)on;
         }
         nvs_close(nvs);
     }
@@ -635,6 +879,9 @@ esp_err_t gnss_start(void)
     data.hdop = NAN;
     data.speed_kmh = NAN;
     data.course_deg = NAN;
+    data.speed_out_kmh = NAN;
+    data.course_out_deg = NAN;
+    data.speed_acc_kmh = NAN;
     data.baud = CONFIG_RGNSS_GNSS_BAUD;
 
     const uart_config_t cfg = {

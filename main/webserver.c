@@ -256,13 +256,27 @@ static esp_err_t status_get(httpd_req_t *req)
     json_num(&j, "lon", g.longitude, 7);
     json_num(&j, "alt", g.altitude_m, 1);
     json_num(&j, "hdop", g.hdop, 2);
-    json_num(&j, "speed_kmh", g.speed_kmh, 1);
-    json_num(&j, "course", g.course_deg, 1);
+    // As they go out to TCP and BLE (smoothed, 0 at rest, when that is on);
+    // the receiver's own under raw_.
+    json_num(&j, "speed_kmh", g.speed_out_kmh, 1);
+    json_num(&j, "course", g.course_out_deg, 1);
+    json_num(&j, "raw_speed_kmh", g.speed_kmh, 2);
+    json_num(&j, "raw_course", g.course_deg, 1);
+    json_num(&j, "speed_acc_kmh", g.speed_acc_kmh, 2);
     json_str(&j, "utc", g.utc[0] ? g.utc : NULL);
     json_int(&j, "spoof", g.spoof);
     json_bool(&j, "implausible", g.implausible);
     json_str(&j, "implausible_why", g.implausible_why[0] ? g.implausible_why : NULL);
     json_bool(&j, "withhold_spoofed", gnss_withhold_spoofed());
+    gnss_settings_t gs;
+    gnss_cfg_state_t cfg;
+    gnss_get_settings(&gs, &cfg);
+    static const char *const MOTION[] = {"none", "walking", "vehicle", "both"};
+    static const char *const CFG[] = {"unsent", "pending", "ok", "rejected"};
+    json_bool(&j, "filter_speed", gs.filter_speed);
+    json_str(&j, "motion", MOTION[gs.motion]);
+    json_str(&j, "receiver_config", CFG[cfg]);
+    json_bool(&j, "withholding", g.withholding);
     json_close(&j);
 
     float field[3];
@@ -823,15 +837,43 @@ static esp_err_t heading_post(httpd_req_t *req)
 
 static esp_err_t gnss_post(httpd_req_t *req)
 {
-    char body[64], value[8];
+    char body[96], value[12];
     if (read_body(req, body, sizeof(body)) != ESP_OK) {
         return reply(req, HTTPD_400, "The request was too long");
     }
-    if (httpd_query_key_value(body, "withhold_spoofed", value, sizeof(value)) != ESP_OK) {
-        return reply(req, HTTPD_400, "Nothing to do");
+    bool any = false;
+    if (httpd_query_key_value(body, "withhold_spoofed", value, sizeof(value)) == ESP_OK) {
+        any = true;
+        if (gnss_set_withhold_spoofed(value[0] == '1') != ESP_OK) {
+            return reply(req, HTTPD_500, "Couldn't save the setting");
+        }
     }
-    if (gnss_set_withhold_spoofed(value[0] == '1') != ESP_OK) {
+    // The motion settings: any of them, the rest kept as they are.
+    gnss_settings_t gs;
+    gnss_cfg_state_t cfg;
+    gnss_get_settings(&gs, &cfg);
+    bool motion_changed = false;
+    if (httpd_query_key_value(body, "filter_speed", value, sizeof(value)) == ESP_OK) {
+        gs.filter_speed = value[0] == '1';
+        motion_changed = true;
+    }
+    if (httpd_query_key_value(body, "motion", value, sizeof(value)) == ESP_OK) {
+        static const char *const MOTION[] = {"none", "walking", "vehicle", "both"};
+        size_t k = 0;
+        while (k < 4 && strcmp(value, MOTION[k]) != 0) {
+            k++;
+        }
+        if (k == 4) {
+            return reply(req, HTTPD_400, "motion must be none, walking, vehicle or both");
+        }
+        gs.motion = (gnss_motion_t)k;
+        motion_changed = true;
+    }
+    if (motion_changed && gnss_set_settings(&gs) != ESP_OK) {
         return reply(req, HTTPD_500, "Couldn't save the setting");
+    }
+    if (!any && !motion_changed) {
+        return reply(req, HTTPD_400, "Nothing to do");
     }
     return reply(req, HTTPD_200, NULL);
 }

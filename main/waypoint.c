@@ -232,9 +232,10 @@ bool waypoint_nav(const gnss_data_t *fix, waypoint_t *wp, waypoint_nav_t *out)
     out->bearing_mag = bearing_declination(&decl) ? fmod(out->bearing_true - decl + 360.0, 360.0) : NAN;
     // The part of the speed that is toward the waypoint: negative moving away.
     // The receiver leaves the course empty when it can't tell, standing still.
-    out->closing_kn = isfinite(fix->speed_kmh) && isfinite(fix->course_deg)
-                          ? fix->speed_kmh / KMH_PER_KNOT * cos(radians(fix->course_deg - out->bearing_true))
-                          : NAN;
+    // The speed as it goes out, smoothed and 0 at rest when that is on.
+    out->closing_kn = isfinite(fix->speed_out_kmh) && isfinite(fix->course_out_deg)
+                          ? fix->speed_out_kmh / KMH_PER_KNOT * cos(radians(fix->course_out_deg - out->bearing_true))
+                          : fix->speed_out_kmh == 0.0f ? 0.0 : NAN;
     out->arrived = out->distance_m <= WAYPOINT_ARRIVAL_M;
     return true;
 }
