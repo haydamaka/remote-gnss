@@ -51,6 +51,8 @@ typedef struct {
     uint32_t sentences;
     uint32_t bytes;
     uint32_t dropped;
+    bool switch_ble;   // the switch says BLE now: where a restart would go
+    bool wifi_forced;  // on WiFi this boot against the switch (asked over BLE, or BLE failed)
 } nmea_ble_status_t;
 
 void nmea_ble_status(nmea_ble_status_t *out);

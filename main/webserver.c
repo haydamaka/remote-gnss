@@ -323,6 +323,8 @@ static esp_err_t status_get(httpd_req_t *req)
     json_bool(&j, "available", true);
     json_bool(&j, "connected", b.connected);
     json_int(&j, "switch_gpio", CONFIG_RGNSS_RADIO_SWITCH_GPIO);
+    json_str(&j, "switch", b.switch_ble ? "ble" : "wifi");
+    json_bool(&j, "wifi_forced", b.wifi_forced);
 #else
     json_bool(&j, "available", false);
 #endif

@@ -247,7 +247,12 @@
         <tr><th>Access point</th><td id="w-ap">—</td></tr>
         <tr><th>Hostname</th><td id="w-host">—</td></tr>
         <tr><th>Device</th><td id="w-sys">—</td></tr>
+        <tr id="w-radio-row" hidden><th>Radio switch</th><td id="w-radio">—</td></tr>
       </table>
+      <div class="buttons">
+        <button class="secondary" type="button" id="restart">Restart</button>
+      </div>
+      <p class="status" id="restart-msg" role="status"></p>
     </section>
     <section>
       <h2>Saved networks</h2>
@@ -617,12 +622,37 @@ function renderBle(ble, wifi) {
   const phone = section.nextElementSibling;
   section.hidden = !ble.available;
   if (phone) phone.hidden = !ble.available;
+  $('w-radio-row').hidden = !ble.available;
   if (!ble.available) return;
 
+  lastBle = ble;
+  $('w-radio').textContent = ble.switch === 'ble'
+    ? (ble.wifi_forced ? 'Bluetooth, but WiFi was asked for this boot: a restart goes back to Bluetooth'
+                       : 'Bluetooth: a restart goes to Bluetooth')
+    : 'WiFi';
   const host = wifi.hostname || '';
   document.querySelectorAll('.ble-name').forEach(e => e.textContent = host.replace(/\.local$/, ''));
   document.querySelectorAll('.ble-host').forEach(e => e.textContent = host);
 }
+
+let lastBle = {};
+
+// The switch decides where the device comes back: on Bluetooth this page stops
+// answering until the switch is back on WiFi, so say so first.
+$('restart').onclick = async () => {
+  const toBle = lastBle.switch === 'ble';
+  if (!confirm(toBle
+      ? 'Restart? The switch is on Bluetooth, so the device comes back on Bluetooth and this page stops responding until the switch is on WiFi.'
+      : 'Restart the device? This page comes back in a few seconds.')) return;
+  $('restart').disabled = true;
+  status($('restart-msg'), toBle ? 'Restarting on Bluetooth. This page stops here.' : 'Restarting…', 'ok');
+  try {
+    await fetch('/api/restart', {method: 'POST', signal: AbortSignal.timeout(5000)});
+  } catch {
+    // the reply can race the restart
+  }
+  setTimeout(() => { $('restart').disabled = false; $('restart-msg').textContent = ''; }, 15000);
+};
 
 function renderSystem(sys) {
   const t = sys.uptime_s;

@@ -76,6 +76,7 @@ static bool advertising;
 static bool synced;         // the host has finished starting; GAP calls work
 static bool enabled;  // BLE has the radio now
 static int boot_level;  // the switch's level when the radio was chosen
+static bool wifi_forced;  // this boot is on WiFi although the switch said BLE
 
 // Commands arrive on RX as lines, possibly split over several writes; the
 // longest, WIFI, is about 210 bytes.
@@ -606,10 +607,12 @@ bool nmea_ble_boot_mode(void)
     wifi_this_boot = 0;
     if (forced == WIFI_THIS_BOOT_MAGIC) {
         ESP_LOGW(TAG, "BLE failed to start last time: WiFi gets this boot");
+        wifi_forced = boot_level != 0;
         return false;
     }
     if (forced == WIFI_ASKED_MAGIC) {
         ESP_LOGW(TAG, "WiFi asked for over BLE: WiFi gets this boot, until the switch moves");
+        wifi_forced = boot_level != 0;
         return false;
     }
     return boot_level != 0;
@@ -644,6 +647,8 @@ void nmea_ble_status(nmea_ble_status_t *out)
     out->connected = conn != BLE_HS_CONN_HANDLE_NONE;
     out->subscribed = subscribed;
     out->mtu = out->connected ? ble_att_mtu(conn) : 0;
+    out->switch_ble = gpio_get_level(CONFIG_RGNSS_RADIO_SWITCH_GPIO) != 0;
+    out->wifi_forced = wifi_forced;
     strlcpy(out->peer, peer, sizeof(out->peer));
     if (sub != NULL) {
         nmea_sub_stats_t stats;

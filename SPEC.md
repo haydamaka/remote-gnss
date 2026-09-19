@@ -168,6 +168,12 @@ home network.
   switch. If BLE fails to start, the device restarts into one
   boot on WiFi, whatever the switch; flipping it, or a power cycle, tries BLE
   again.
+- **Restart button** (added 2026-09-19) on the WiFi/BLE tab, next to the device
+  line (`POST /api/restart`). A restart follows the switch: after a boot on
+  WiFi against it (`$PPUCK,RADIO,WIFI` over BLE, or a failed BLE start), it goes
+  back to BLE. The page shows where the switch stands (`ble.switch`,
+  `ble.wifi_forced` in `/api/status`) and warns before a restart that leads to
+  BLE, since the page then stops answering.
 
 ## Spoofing
 
