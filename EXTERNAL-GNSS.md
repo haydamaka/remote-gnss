@@ -156,13 +156,11 @@ So the device now does one or the other, and says so:
 
 - **WiFi by default.** The BLE stack is not even initialised, which leaves its
   ~40 KB of heap to WiFi. BLE is silent; nothing taxes the radio.
-- **Switching to BLE** (`POST /api/ble` with `on`, or the button on the WiFi/BLE
-  page) suspends the station and the access point fallback, then brings NimBLE
-  up with the whole radio.
-- **It always comes back.** With nothing connected over BLE for
-  `CONFIG_RGNSS_BLE_IDLE_S` (120 s), the radio goes back to WiFi. The
-  preference is saved, so the device starts on BLE again next time -- but it
-  can never strand itself, because the fallback does not depend on the setting.
+- **A switch chooses** (since 2026-09-18). A toggle switch from GPIO10 to
+  ground: on is WiFi, off is BLE. It is read at boot and flipping it restarts
+  the device on the other radio. This replaced a button on the web page with a
+  saved preference and a return to WiFi after `CONFIG_RGNSS_BLE_IDLE_S` without
+  a client: with a switch the device can't strand itself, so neither is needed.
 
 Two bugs found building this, both worth remembering. `enabled` was set *after*
 the stack started, so the host's sync callback asked "is BLE on?" while it was

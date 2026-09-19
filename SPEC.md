@@ -31,6 +31,9 @@ Wiring:
 | DA      | 1 (I2C SDA)   |
 | CL      | 0 (I2C SCL)   |
 
+A toggle switch between pad 10 and G chooses the radio (see External GNSS
+interfaces).
+
 Pins to leave alone: 2 (strapping pin, must read high at reset), 8 (onboard
 LED), 9 (BOOT button), 20/21 (UART0, serial console).
 
@@ -118,7 +121,6 @@ home network.
 | `POST /api/wifi/forget` | `ssid`, form-encoded: forget that network; with no body, every saved one; no restart |
 | `GET /api/wifi/scan` | nearby networks: `ssid`, `rssi`, `channel`, `secure`, `known`, strongest first; takes two or three seconds, and 503 while busy joining |
 | `POST /api/ota` | a firmware `.bin` as the body: check it, install it, restart into it |
-| `POST /api/ble` | `on` or `off` as the whole body: choose the radio for next boot and restart |
 | `POST /api/restart` | restart the device |
 
 ## Updating the firmware
@@ -140,6 +142,13 @@ home network.
 - Plan: [EXTERNAL-GNSS.md](EXTERNAL-GNSS.md). Note that the ESP32-C3 has no
   Bluetooth Classic (no SPP): Bluetooth there means BLE with the Nordic UART
   Service.
+- **The radio is chosen by a switch only** (added 2026-09-18). A switch on GPIO10
+  to ground: on is WiFi, off is Bluetooth. It is read at boot, and flipping it
+  restarts the device on the other radio. The web page has no Bluetooth
+  control and there is no idle fallback to WiFi; the page only explains the
+  switch. If BLE fails to start, the device restarts into one
+  boot on WiFi, whatever the switch; flipping it, or a power cycle, tries BLE
+  again.
 
 ## Spoofing
 

@@ -127,22 +127,22 @@ menu "Remote GNSS"
             default 4
             depends on RGNSS_TCP_ENABLED
 
-        config RGNSS_BLE_IDLE_S
-            int "Seconds without a BLE client before WiFi gets the radio back"
-            range 30 3600
-            default 120
-            depends on RGNSS_BLE_ENABLED
-            help
-                Switching to BLE stops WiFi, so something has to undo it if the
-                client never arrives or walks away. This is never saved either: a
-                restart always comes up on WiFi.
-
         config RGNSS_BLE_ENABLED
             bool "Serve NMEA over BLE (Nordic UART Service)"
             default y
             help
                 Needs Bluetooth and NimBLE enabled, which sdkconfig.defaults does.
                 The ESP32-C3 has no Bluetooth Classic, so this is BLE only: no SPP.
+
+        config RGNSS_RADIO_SWITCH_GPIO
+            int "GPIO of the WiFi/BLE switch"
+            range 0 21
+            default 10
+            depends on RGNSS_BLE_ENABLED
+            help
+                A switch to ground chooses the radio: on (closed) is WiFi, off
+                (open, held high by the internal pull-up) is BLE. Flipping it
+                restarts the device on the other one.
 
     endmenu
 

@@ -2,13 +2,13 @@
 
 #include <string.h>
 
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_log.h"
-#include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "nvs.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "host/ble_hs.h"
@@ -39,18 +39,15 @@
 #define ADV_ITVL_MIN 800
 #define ADV_ITVL_MAX 1600
 
-#define NVS_NAMESPACE "ble"
-#define NVS_KEY_PREFERRED "prefer"
+// The radio switch is read every SWITCH_POLL_MS, and a new position counts once
+// it has held for SWITCH_STEADY polls, so contact bounce doesn't restart twice.
+#define SWITCH_POLL_MS 100
+#define SWITCH_STEADY 3
 
-// Survives a restart but not a power cycle: set when BLE hands the radio over,
-// so the restart that follows comes up on WiFi even though the saved
-// preference still says BLE. Power it off and on and it starts on BLE again.
-//
-// RTC_NOINIT_ATTR, not RTC_DATA_ATTR: the latter is zeroed on every start-up,
-// including esp_restart(), so the flag never reached the next boot and the
-// device went straight back to BLE. Uninitialised memory reads as anything, so
-// only the magic value counts as "set" -- which is also what makes a power
-// cycle mean "start on BLE again".
+// Survives a restart but not a power cycle: set when BLE fails to start, so the
+// restart that follows comes up on WiFi whatever the switch says, rather than
+// on BLE again. RTC_NOINIT_ATTR, not RTC_DATA_ATTR, which is zeroed on every
+// start-up; being uninitialised, only the magic value counts as set.
 #define WIFI_THIS_BOOT_MAGIC 0x57494649u
 static RTC_NOINIT_ATTR uint32_t wifi_this_boot;
 
@@ -73,9 +70,8 @@ static nmea_sub_t sub;
 static uint32_t dropped;
 static bool advertising;
 static bool synced;         // the host has finished starting; GAP calls work
-static bool enabled;        // BLE has the radio now
-static bool preferred;      // and it is what the device starts with (NVS)
-static int64_t idle_since;  // when the last client left, or BLE was switched on
+static bool enabled;  // BLE has the radio now
+static int boot_level;  // the switch's level when the radio was chosen
 
 static int gap_event(struct ble_gap_event *event, void *arg);
 
@@ -212,7 +208,6 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         subscribed = false;
         peer[0] = '\0';
-        idle_since = esp_timer_get_time();
         sync_advertising();
         // Not advertise(): the station has very likely been knocked off the
         // air by this connection, and it gets the radio back first.
@@ -303,17 +298,7 @@ static void pump_task(void *arg)
                 sub = NULL;
             }
             len = off = 0;
-            // Hand the radio back if nobody has used BLE for a while. Without
-            // this, switching to BLE and walking away would leave the device
-            // off the network until someone power-cycled it.
             sync_advertising();
-            if (enabled && conn_handle == BLE_HS_CONN_HANDLE_NONE &&
-                esp_timer_get_time() - idle_since > (int64_t)CONFIG_RGNSS_BLE_IDLE_S * 1000000) {
-                ESP_LOGI(TAG, "no client for %d s; restarting so WiFi gets the radio",
-                         CONFIG_RGNSS_BLE_IDLE_S);
-                wifi_this_boot = WIFI_THIS_BOOT_MAGIC;  // the saved preference stands
-                esp_restart();
-            }
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
@@ -361,8 +346,8 @@ static void pump_task(void *arg)
 
 // Brings the BLE stack up. Everything is registered on each start, because
 // stopping tears the host down completely.
-// NimBLE asserts and reboots when it cannot allocate, and with the preference
-// saved in NVS that turns into a boot loop the device cannot be talked out of.
+// NimBLE asserts and reboots when it cannot allocate, and with the switch on
+// BLE that turns into a boot loop.
 // So the heap is checked first and BLE simply declines to start if it is thin.
 #define BLE_HEAP_NEEDED 45000
 
@@ -394,46 +379,58 @@ static esp_err_t ble_stack_start(void)
     return ESP_OK;
 }
 
-// True when this boot should run BLE rather than WiFi. Called before either
-// radio is started, so the decision costs nothing to act on.
-bool nmea_ble_boot_mode(void)
+// Runs in the esp_timer task. Moving the radio while running hung inside
+// nimble_port_stop() and left the device with neither, so a flipped switch
+// restarts into the other one instead.
+static void switch_poll(void *arg)
 {
-    nvs_handle_t nvs;
-    uint8_t stored = 0;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
-        nvs_get_u8(nvs, NVS_KEY_PREFERRED, &stored);
-        nvs_close(nvs);
+    static int steady;
+    if (gpio_get_level(CONFIG_RGNSS_RADIO_SWITCH_GPIO) == boot_level) {
+        steady = 0;
+    } else if (++steady >= SWITCH_STEADY) {
+        ESP_LOGI(TAG, "radio switch moved; restarting on %s", boot_level ? "WiFi" : "BLE");
+        esp_restart();
     }
-    preferred = stored != 0;
-
-    if (wifi_this_boot == WIFI_THIS_BOOT_MAGIC) {
-        wifi_this_boot = 0;  // this boot only
-        ESP_LOGI(TAG, "set to start on BLE, but nothing used it last time: WiFi gets this boot");
-        return false;
-    }
-    return preferred;
 }
 
-// Saves the choice and restarts into it, rather than moving the radio while
-// running: tearing the BLE stack down mid-flight hung inside nimble_port_stop()
-// and left the device with neither radio.
-esp_err_t nmea_ble_set_enabled(bool on)
+// The switch closes to ground: on (low) is WiFi, off (pulled high) is BLE.
+bool nmea_ble_boot_mode(void)
 {
-    nvs_handle_t nvs;
-    ESP_RETURN_ON_ERROR(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs), TAG, "open NVS");
-    esp_err_t err = nvs_set_u8(nvs, NVS_KEY_PREFERRED, on ? 1 : 0);
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs);
-    }
-    nvs_close(nvs);
-    ESP_RETURN_ON_ERROR(err, TAG, "save the preference");
+    gpio_config_t io = {
+        .pin_bit_mask = 1ULL << CONFIG_RGNSS_RADIO_SWITCH_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&io));
+    vTaskDelay(pdMS_TO_TICKS(10));  // let the pull-up charge the line
+    boot_level = gpio_get_level(CONFIG_RGNSS_RADIO_SWITCH_GPIO);
 
-    preferred = on;
-    wifi_this_boot = on ? 0 : WIFI_THIS_BOOT_MAGIC;
-    ESP_LOGI(TAG, "restarting to come up on %s", on ? "BLE" : "WiFi");
-    vTaskDelay(pdMS_TO_TICKS(250));  // let the reply reach the browser first
+    const esp_timer_create_args_t args = {.callback = switch_poll, .name = "radio_switch"};
+    esp_timer_handle_t timer;
+    if (esp_timer_create(&args, &timer) != ESP_OK ||
+        esp_timer_start_periodic(timer, SWITCH_POLL_MS * 1000) != ESP_OK) {
+        ESP_LOGE(TAG, "can't watch the radio switch; flipping it takes a restart");
+    }
+    ESP_LOGI(TAG, "radio switch on GPIO%d is %s: %s", CONFIG_RGNSS_RADIO_SWITCH_GPIO, boot_level ? "off" : "on",
+             boot_level ? "BLE" : "WiFi");
+    // This boot only: the flag is spent here, so a restart or a power cycle
+    // goes back to the switch. And switch_poll() still compares against
+    // boot_level, so flipping the switch either way ends it too.
+    uint32_t forced = wifi_this_boot;
+    wifi_this_boot = 0;
+    if (forced == WIFI_THIS_BOOT_MAGIC) {
+        ESP_LOGW(TAG, "BLE failed to start last time: WiFi gets this boot");
+        return false;
+    }
+    return boot_level != 0;
+}
+
+// A half-started BLE stack holds the radio and its heap, and tearing it down
+// has hung before, so this restarts into a clean WiFi boot instead.
+void nmea_ble_restart_on_wifi(void)
+{
+    wifi_this_boot = WIFI_THIS_BOOT_MAGIC;
     esp_restart();
-    return ESP_OK;
 }
 
 // Only called when nmea_ble_boot_mode() said so, so WiFi was never started and
@@ -442,12 +439,10 @@ esp_err_t nmea_ble_start(void)
 {
     ESP_RETURN_ON_ERROR(nmea_hub_init(), TAG, "hub");
     enabled = true;
-    idle_since = esp_timer_get_time();
     ESP_RETURN_ON_ERROR(ble_stack_start(), TAG, "start the BLE stack");
     ESP_RETURN_ON_FALSE(xTaskCreate(pump_task, "nmea_ble", 3072, NULL, 5, NULL) == pdPASS, ESP_ERR_NO_MEM,
                         TAG, "create task");
-    ESP_LOGI(TAG, "BLE has the radio; it goes back to WiFi after %d s with no client",
-             CONFIG_RGNSS_BLE_IDLE_S);
+    ESP_LOGI(TAG, "BLE has the radio");
     return ESP_OK;
 }
 
@@ -456,7 +451,6 @@ void nmea_ble_status(nmea_ble_status_t *out)
     uint16_t conn = conn_handle;
     memset(out, 0, sizeof(*out));
     out->enabled = enabled;
-    out->preferred = preferred;
     out->connected = conn != BLE_HS_CONN_HANDLE_NONE;
     out->subscribed = subscribed;
     out->mtu = out->connected ? ble_att_mtu(conn) : 0;

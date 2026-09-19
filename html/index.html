@@ -278,28 +278,14 @@
         Bluetooth Classic, so apps that pair with a &ldquo;serial&rdquo; GPS will not find
         it.
       </p>
-      <table>
-        <tr><th>Starts on</th><td id="ble-pref">&mdash;</td></tr>
-      </table>
-      <div class="buttons">
-        <button class="secondary" type="button" id="ble-on">Switch to Bluetooth</button>
-        <button class="secondary" type="button" id="ble-off" hidden>Start on WiFi instead</button>
-      </div>
-      <p class="status" id="ble-msg" role="status"></p>
-      <h3>What happens when you switch</h3>
-      <ol class="note">
-        <li>WiFi stops and <strong>this page stops responding</strong>. That is expected.</li>
-        <li>The device advertises as <code class="ble-name">haydamaka-puck-gnss</code> and serves
-            the same NMEA sentences over BLE.</li>
-        <li>The choice is remembered, so it starts on Bluetooth from now on.</li>
-        <li>Once nothing has been connected over Bluetooth for
-            <span id="ble-idle">a couple of minutes</span>, the radio goes back to WiFi and
-            this page returns. A restart does the same.</li>
-      </ol>
       <p class="note">
-        So Bluetooth cannot leave the device unreachable &mdash; it always comes back on its
-        own. To stop it starting on Bluetooth, come back here and press &ldquo;Start on WiFi
-        instead&rdquo;.
+        The switch on the device chooses: <strong>on is WiFi</strong>, <strong>off is
+        Bluetooth</strong>. Flipping it restarts the device on the other one. On Bluetooth
+        this page does not respond; it comes back when the switch goes back on.
+      </p>
+      <p class="note">
+        On Bluetooth the device advertises as <code class="ble-name">haydamaka-puck-gnss</code>
+        and serves the same NMEA sentences over BLE.
       </p>
     </section>
     <section>
@@ -314,7 +300,7 @@
       <ol class="note">
         <li>Install <strong>GPS Connector</strong>, which speaks both BLE and TCP. GNSS
             Master and SW Maps work the same way.</li>
-        <li>On this page, press <strong>Switch to Bluetooth</strong>.</li>
+        <li>Turn the switch on the device off, for Bluetooth.</li>
         <li>In Android, unlock Developer options: Settings &rarr; About phone &rarr; tap
             <em>Build number</em> seven times.</li>
         <li>Settings &rarr; System &rarr; Developer options &rarr; <em>Select mock location
@@ -627,15 +613,12 @@ $('w-scan').onclick = scanNetworks;
 // Takes the whole status: it needs the hostname from the WiFi section as well.
 function renderBle(ble, wifi) {
   ble = ble || {};
-  const section = $('ble-pref').closest('section');
-  const phone = $('ble-pref').closest('section').nextElementSibling;
+  const section = document.querySelector('.ble-name').closest('section');
+  const phone = section.nextElementSibling;
   section.hidden = !ble.available;
   if (phone) phone.hidden = !ble.available;
   if (!ble.available) return;
 
-  $('ble-pref').textContent = ble.preferred ? 'Bluetooth' : 'WiFi';
-  $('ble-off').hidden = !ble.preferred;
-  if (ble.idle_s) $('ble-idle').textContent = `${ble.idle_s} s`;
   const host = wifi.hostname || '';
   document.querySelectorAll('.ble-name').forEach(e => e.textContent = host.replace(/\.local$/, ''));
   document.querySelectorAll('.ble-host').forEach(e => e.textContent = host);
@@ -701,27 +684,6 @@ $('wifi-form').onsubmit = async e => {
     loadSaved();
   }
 };
-
-// This page is reachable only while WiFi has the radio, so Bluetooth is always
-// off while you are reading it. "Switch to Bluetooth" both remembers the choice
-// and acts on it now; the device comes back on its own.
-document.getElementById('ble-on').addEventListener('click', async () => {
-  if (!confirm('Switch to Bluetooth? WiFi stops and this page stops responding. '
-               + 'The device starts on Bluetooth from now on, and returns to WiFi '
-               + 'whenever nothing has been connected over Bluetooth for a while.')) return;
-  document.getElementById('ble-msg').textContent =
-      'Switching to Bluetooth. This page stops here; the device comes back to WiFi by itself.';
-  try {
-    await fetch('/api/ble', {method: 'POST', body: 'on'});
-  } catch (e) {
-    // Expected: the reply races the radio going away.
-  }
-});
-
-document.getElementById('ble-off').addEventListener('click', async () => {
-  document.getElementById('ble-msg').textContent = 'Starting on WiFi from now on.';
-  await fetch('/api/ble', {method: 'POST', body: 'off'});
-});
 
 // ---- Magnetometer plot and calibration ----
 // The firmware runs the calibration (see CALIBRATION.md). The plot shows its

@@ -37,9 +37,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // One radio, so one of the two. BLE only when it was asked for and the last
-    // BLE session actually had a client; otherwise WiFi, which is what makes the
-    // device configurable again.
+    // One radio, so one of the two, as the switch says.
     bool ble_mode = false;
 #if CONFIG_RGNSS_BLE_ENABLED
     ble_mode = nmea_ble_boot_mode();
@@ -79,10 +77,12 @@ void app_main(void)
 #if CONFIG_RGNSS_BLE_ENABLED
     if (ble_mode) {
         // If this fails there is no web page to say so, so fall back rather
-        // than sit there with neither radio: restart, which comes up on WiFi.
+        // than sit there with neither radio: restart into one boot on WiFi,
+        // whatever the switch, since a half-started BLE stack can't be trusted
+        // to let go of the radio or its heap.
         if (ESP_ERROR_CHECK_WITHOUT_ABORT(nmea_ble_start()) != ESP_OK) {
             ESP_LOGE(TAG, "BLE would not start; restarting into WiFi");
-            nmea_ble_set_enabled(false);
+            nmea_ble_restart_on_wifi();
         }
     }
 #endif
