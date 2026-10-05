@@ -6,8 +6,10 @@
 // throws away most of what an RTK fix is worth. So this module configures it,
 // every time it is found:
 //
-//   - the link rate, because 38400 baud carries about 3.8 kB/s and a
-//     multi-constellation stream above 3 Hz is more than that;
+//   - NMEA output on the port, which a receiver set up for UBX logging may
+//     have turned off;
+//   - the link rate, if it is slower than ours, because 38400 baud carries
+//     about 3.8 kB/s and a multi-constellation stream above 3 Hz is more;
 //   - the navigation rate;
 //   - high-precision NMEA, which adds the decimal digits the centimetres need;
 //   - the sentence set: what gnss.c and the clients actually read, with GSV
@@ -35,6 +37,7 @@ static const char *TAG = "gnss-f9p";
 #define CFG_RATE_NAV               0x30210002  // U2, measurements per navigation solution
 #define CFG_NMEA_HIGHPREC          0x10930006  // L
 #define CFG_UART1_BAUDRATE         0x40520001  // U4
+#define CFG_UART1OUTPROT_NMEA      0x10740002  // L
 #define CFG_MSGOUT_NMEA_GGA_UART1  0x209100BB  // U1, solutions per sentence; 0 is off
 #define CFG_MSGOUT_NMEA_GLL_UART1  0x209100CA
 #define CFG_MSGOUT_NMEA_GSA_UART1  0x209100C0
@@ -46,12 +49,15 @@ static const char *TAG = "gnss-f9p";
 
 #define RATE_HZ CONFIG_RGNSS_GNSS_RATE_HZ
 
-static int configure(void)
+static int configure(int baud)
 {
     // GST carries the position's own error estimate, which is the one number
     // that says whether the RTK fix is real; it is off by default. ZDA is on
     // for clients that want the date without parsing RMC.
     const gnss_cfg_t items[] = {
+        // A receiver set up for somebody's logger may have NMEA off on the
+        // port altogether; UBX is left as its owner had it.
+        {CFG_UART1OUTPROT_NMEA, 1},
         {CFG_RATE_MEAS, 1000 / RATE_HZ},
         {CFG_RATE_NAV, 1},
         {CFG_NMEA_HIGHPREC, 1},
@@ -67,11 +73,16 @@ static int configure(void)
     gnss_ubx_valset(items, sizeof(items) / sizeof(items[0]));
     ESP_LOGI(TAG, "configured for %d Hz with high-precision NMEA", RATE_HZ);
 
+    // A faster link than ours was chosen by the receiver's owner, likely for
+    // the UBX they have it sending; slowing it down could choke that.
+    if (baud >= CONFIG_RGNSS_GNSS_BAUD) {
+        return 0;
+    }
     // Last, and in a frame of its own: the receiver switches its port the
     // moment this one is applied, so anything sharing the frame would be
     // acknowledged - or not - at a rate nobody is listening at yet.
-    const gnss_cfg_t baud[] = {{CFG_UART1_BAUDRATE, CONFIG_RGNSS_GNSS_BAUD}};
-    gnss_ubx_valset(baud, 1);
+    const gnss_cfg_t rate[] = {{CFG_UART1_BAUDRATE, CONFIG_RGNSS_GNSS_BAUD}};
+    gnss_ubx_valset(rate, 1);
     return CONFIG_RGNSS_GNSS_BAUD;
 }
 

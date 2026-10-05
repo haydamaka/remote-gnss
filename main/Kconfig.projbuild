@@ -4,6 +4,7 @@ menu "Remote GNSS"
 
         config RGNSS_AP_SSID
             string "Access point name"
+            default "haydamaka-f9p-gnss" if IDF_TARGET_ESP32
             default "haydamaka-puck-gnss"
             help
                 Open (passwordless) access point the device brings up when it has no
@@ -30,6 +31,7 @@ menu "Remote GNSS"
 
     config RGNSS_HOSTNAME
         string "mDNS hostname (without .local)"
+        default "haydamaka-f9p-gnss" if IDF_TARGET_ESP32
         default "haydamaka-puck-gnss"
         help
             A single label: ESP-IDF's mDNS responder writes a dotted name such as
@@ -69,6 +71,7 @@ menu "Remote GNSS"
 
         choice RGNSS_GNSS_RECEIVER
             prompt "Receiver"
+            default RGNSS_GNSS_F9P if IDF_TARGET_ESP32
             default RGNSS_GNSS_WS181
             help
                 Which receiver this firmware is built for. It decides the rate
@@ -95,15 +98,22 @@ menu "Remote GNSS"
                 The WS-M181 is left at whatever Walksnail set, which is 10 Hz.
 
         comment "Leave GPIO 2, 8, 9, 20 and 21 alone: strapping pin, LED, BOOT and the console"
+            depends on IDF_TARGET_ESP32C3
+        comment "Leave GPIO 0, 2, 5, 12, 15 (strapping), 6-11 (flash) and 1, 3 (console) alone; 34-39 are inputs without pull-ups"
+            depends on IDF_TARGET_ESP32
 
         config RGNSS_GNSS_RX_GPIO
             int "UART RX GPIO (receiver TX)"
+            range 0 39 if IDF_TARGET_ESP32
             range 0 21
+            default 16 if IDF_TARGET_ESP32
             default 4
 
         config RGNSS_GNSS_TX_GPIO
             int "UART TX GPIO (receiver RX)"
+            range 0 39 if IDF_TARGET_ESP32
             range 0 21
+            default 17 if IDF_TARGET_ESP32
             default 3
 
         config RGNSS_GNSS_BAUD
@@ -180,39 +190,72 @@ menu "Remote GNSS"
             default y
             help
                 Needs Bluetooth and NimBLE enabled, which sdkconfig.defaults does.
-                The ESP32-C3 has no Bluetooth Classic, so this is BLE only: no SPP.
+                BLE only, no SPP: the ESP32-C3 has no Bluetooth Classic, and the
+                ESP32 build leaves it out to keep the two the same.
 
         config RGNSS_LED_GPIO
-            int "GPIO of the status LED (lit when low)"
+            int "GPIO of the status LED"
+            range 0 39 if IDF_TARGET_ESP32
             range 0 21
+            default 2 if IDF_TARGET_ESP32
             default 8
             help
-                The SuperMini's blue LED. See led.h for what it shows.
+                The SuperMini's blue LED, or the WROOM DevKit's on GPIO 2. See
+                led.h for what it shows.
+
+        config RGNSS_LED_ACTIVE_LOW
+            bool "The LED is lit when the GPIO is driven low"
+            default n if IDF_TARGET_ESP32
+            default y
+            help
+                The SuperMini's LED hangs from 3.3 V and lights when the pin
+                sinks; the DevKit's sits between the pin and ground.
 
         config RGNSS_RADIO_SWITCH_GPIO
             int "GPIO of the WiFi/BLE switch"
+            range 0 39 if IDF_TARGET_ESP32
             range 0 21
+            default 27 if IDF_TARGET_ESP32
             default 10
             depends on RGNSS_BLE_ENABLED
             help
-                A switch to ground chooses the radio: on (closed) is WiFi, off
-                (open, held high by the internal pull-up) is BLE. Flipping it
+                A switch to ground chooses the radio: on the puck, on (closed) is
+                WiFi and off (open, held high by the internal pull-up) is BLE;
+                RGNSS_RADIO_SWITCH_OPEN_IS_BLE turns that round. Flipping it
                 restarts the device on the other one.
+
+        config RGNSS_RADIO_SWITCH_OPEN_IS_BLE
+            bool "An open switch, or none fitted, means BLE"
+            default n if IDF_TARGET_ESP32
+            default y
+            depends on RGNSS_BLE_ENABLED
+            help
+                Which radio the pull-up alone chooses. The puck has the switch
+                and boots on BLE with it open. A board without one wants WiFi
+                that way, so that it can be reached and updated; grounding the
+                pin then chooses BLE.
 
     endmenu
 
     menu "Magnetometer"
 
         comment "Leave GPIO 2, 8, 9, 20 and 21 alone: strapping pin, LED, BOOT and the console"
+            depends on IDF_TARGET_ESP32C3
+        comment "Leave GPIO 0, 2, 5, 12, 15 (strapping), 6-11 (flash) and 1, 3 (console) alone; 34-39 are inputs without pull-ups"
+            depends on IDF_TARGET_ESP32
 
         config RGNSS_MAG_SDA_GPIO
             int "I2C SDA GPIO"
+            range 0 39 if IDF_TARGET_ESP32
             range 0 21
+            default 21 if IDF_TARGET_ESP32
             default 1
 
         config RGNSS_MAG_SCL_GPIO
             int "I2C SCL GPIO"
+            range 0 39 if IDF_TARGET_ESP32
             range 0 21
+            default 22 if IDF_TARGET_ESP32
             default 0
 
     endmenu

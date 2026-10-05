@@ -346,6 +346,7 @@ static esp_err_t status_get(httpd_req_t *req)
     json_open(&j, "radio");
     json_num(&j, "wifi_dbm", radio_power_wifi_dbm(), 2);
     json_int(&j, "ble_dbm", radio_power_ble_dbm());
+    json_int(&j, "ble_max_dbm", RADIO_POWER_BLE_MAX_DBM);
     json_close(&j);
 
     json_open(&j, "ble");

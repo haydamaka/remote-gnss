@@ -29,7 +29,8 @@
 // a client has to speak NUS. On Linux, ble-serial binds it to a pty:
 //   ble-serial -d <MAC>   then point gpsd at the /dev/pts it prints.
 // Whether this boot should run BLE instead of WiFi, as the radio switch on
-// CONFIG_RGNSS_RADIO_SWITCH_GPIO says: on is WiFi, off is BLE. Ask before
+// CONFIG_RGNSS_RADIO_SWITCH_GPIO says: on the puck on is WiFi, off is BLE, and
+// CONFIG_RGNSS_RADIO_SWITCH_OPEN_IS_BLE turns that round. Ask before
 // starting either: the chip has one radio, and with both running the station
 // could not hold a distant access point, so the device does one or the other.
 // From then on it watches the switch, and restarts when it is flipped.

@@ -16,6 +16,12 @@
 // second, so this is far past any gap in a healthy stream.
 #define GNSS_SILENT_US (3 * 1000000)
 
+#if CONFIG_RGNSS_LED_ACTIVE_LOW
+#define LED_ON 0
+#else
+#define LED_ON 1
+#endif
+
 static const char *TAG = "led";
 
 static bool ble;
@@ -81,7 +87,7 @@ static void led_task(void *arg)
         } else {
             lit = g.fix != flashing(tick, link);
         }
-        gpio_set_level(CONFIG_RGNSS_LED_GPIO, !lit);  // lit when driven low
+        gpio_set_level(CONFIG_RGNSS_LED_GPIO, lit ? LED_ON : !LED_ON);
         xTaskDelayUntil(&wake, pdMS_TO_TICKS(TICK_MS));
     }
 }
@@ -94,7 +100,7 @@ esp_err_t led_start(bool ble_mode)
         .mode = GPIO_MODE_OUTPUT,
     };
     ESP_RETURN_ON_ERROR(gpio_config(&io), TAG, "configure GPIO%d", CONFIG_RGNSS_LED_GPIO);
-    gpio_set_level(CONFIG_RGNSS_LED_GPIO, 1);
+    gpio_set_level(CONFIG_RGNSS_LED_GPIO, !LED_ON);
     // Low priority: the LED can wait for anything else.
     ESP_RETURN_ON_FALSE(xTaskCreate(led_task, "led", 2048, NULL, 1, NULL) == pdPASS, ESP_ERR_NO_MEM, TAG,
                         "create task");

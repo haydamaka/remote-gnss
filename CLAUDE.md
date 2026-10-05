@@ -25,7 +25,11 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash
 ```
 
-The board enumerates as `/dev/ttyACM0`. Opening that port resets it, so wait
+The WROOM + ZED-F9P build (see SPEC.md, "The WROOM build") goes to its own
+directory: `idf.py -B build-wroom -D SDKCONFIG=sdkconfig.wroom -D IDF_TARGET=esp32 build`,
+flashed on `/dev/ttyUSB0`, reachable as `haydamaka-f9p-gnss.local`.
+
+The SuperMini enumerates as `/dev/ttyACM0`. Opening that port resets it, so wait
 for it to rejoin WiFi before driving it over the network.
 
 ## Secrets

@@ -10,3 +10,6 @@ __pycache__/
 .idea/*
 !.idea/cmake.xml
 .claude/
+build-*/
+sdkconfig.wroom
+sdkconfig.wroom.old

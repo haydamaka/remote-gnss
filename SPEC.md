@@ -6,6 +6,9 @@ module. It serves the position and magnetometer readings on a web page over WiFi
 ## Platform
 
 - ESP32-C3 SuperMini, ESP-IDF v5.5, running on FreeRTOS (ESP-IDF's).
+- A second build for an ESP32-WROOM-32 DevKit with the ZED-F9P: the same
+  firmware, target `esp32`, built into `build-wroom` with its own
+  `sdkconfig.wroom` (see "The WROOM build" below).
 - Settings are kept in NVS.
 
 ## Hardware
@@ -60,18 +63,50 @@ A bare ZED-F9P-02B on a breakout board with an SMA antenna connector, with no
 compass of its own: with it selected, the magnetometer either comes from a
 separate board on the same I2C pins or the compass tab has nothing to show.
 
-It arrives at 38400 baud, 1 Hz, and NMEA rounded to five decimals of a minute —
+Out of the box it arrives at 38400 baud, 1 Hz, and NMEA rounded to five decimals of a minute —
 about 2 cm, which throws away most of what RTK is for. So unlike the WS-M181 it
 is configured on every lock (`gnss_f9p.c`): the link rate, the navigation rate
 (menuconfig, default 5 Hz), high-precision NMEA, and the sentence set with GSV
 slowed to once a second. All of it goes to the receiver's RAM layer, never its
 flash, so pulling its power restores whatever its owner had.
 
+A receiver somebody has set up for logging may come quite differently: the
+first one tried sent UBX only, at 460800 baud, with NMEA off on the port. The
+baud hunt therefore locks on a UBX frame as well as on an NMEA sentence, and
+the configuration turns NMEA output on. A link already faster than
+`RGNSS_GNSS_BAUD` is left at its rate rather than slowed down.
+
 Without RTCM3 corrections on its RX line it is a 1 m receiver with a good
 antenna; an NTRIP client to supply them is not written yet.
 
 Wiring is the same four lines as the WS-M181 — 5V, GND, the receiver's TX to
 GPIO 4 and its RX to GPIO 3 — minus the I2C pair.
+
+### The WROOM build
+
+An ESP32-WROOM-32 DevKit (ESP32-D0WD-V3, 4 MB flash, CH340 USB bridge on
+`/dev/ttyUSB0`) with the ZED-F9P. Selecting the `esp32` target changes the
+defaults in `main/Kconfig.projbuild`; `sdkconfig.defaults.esp32` holds only
+the Bluetooth controller settings.
+
+| | SuperMini (esp32c3) | WROOM (esp32) |
+|---|---|---|
+| Receiver | WS-M181 | ZED-F9P |
+| GNSS UART | UART1, RX 4 / TX 3 | UART2, RX 16 / TX 17 |
+| Magnetometer I2C | SDA 1 / SCL 0 | SDA 21 / SCL 22 |
+| LED | GPIO 8, lit low | GPIO 2, lit high |
+| Radio switch | GPIO 10; open is BLE | GPIO 27; open (none fitted) is WiFi, grounded is BLE |
+| Hostname and AP | `haydamaka-puck-gnss` | `haydamaka-f9p-gnss` |
+| BLE power | 0-20 dBm | 0-9 dBm, the ESP32's ceiling |
+
+```sh
+idf.py -B build-wroom -D SDKCONFIG=sdkconfig.wroom -D IDF_TARGET=esp32 build
+idf.py -B build-wroom -p /dev/ttyUSB0 flash
+```
+
+The F9P board draws enough, with its active antenna, that powering it from the
+DevKit's USB 5V pin dropped the board off USB entirely. Give it its own supply
+and share GND only.
 
 ## WiFi
 

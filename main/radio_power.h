@@ -7,11 +7,17 @@
 // WiFi power is sometimes the more reliable one.
 //
 // WiFi takes 2-20 dBm, applied at once; the driver rounds to its own steps.
-// BLE takes 0-20 dBm in 3 dB steps (and 20), applied when BLE starts: the page
-// is only there on WiFi, so it is for the next boot on BLE.
+// BLE takes 0 dBm up to RADIO_POWER_BLE_MAX_DBM in 3 dB steps (and 20 on the
+// C3), applied when BLE starts: the page is only there on WiFi, so it is for
+// the next boot on BLE.
 
 #define RADIO_POWER_WIFI_DEFAULT_DBM 20.0f
 #define RADIO_POWER_BLE_DEFAULT_DBM 9
+#if CONFIG_IDF_TARGET_ESP32
+#define RADIO_POWER_BLE_MAX_DBM 9
+#else
+#define RADIO_POWER_BLE_MAX_DBM 20
+#endif
 
 float radio_power_wifi_dbm(void);
 int radio_power_ble_dbm(void);

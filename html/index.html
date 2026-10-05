@@ -1040,6 +1040,8 @@ function renderRadio(radio) {
     for (const o of el.options) if (Math.abs(o.value - v) < Math.abs(best.value - v)) best = o;
     el.value = best.value;
   };
+  // What this chip's Bluetooth can reach: +20 dBm on the C3, +9 on the ESP32.
+  for (const o of $('p-ble').options) o.hidden = radio.ble_max_dbm != null && +o.value > radio.ble_max_dbm;
   pick($('p-wifi'), radio.wifi_dbm);
   pick($('p-ble'), radio.ble_dbm);
 }

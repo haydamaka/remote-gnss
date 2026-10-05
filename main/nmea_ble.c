@@ -78,6 +78,14 @@ static bool advertising;
 static bool synced;         // the host has finished starting; GAP calls work
 static bool enabled;  // BLE has the radio now
 static int boot_level;  // the switch's level when the radio was chosen
+
+// The level that means BLE: high, i.e. open, on the puck; low on a board with
+// no switch fitted, which must come up on WiFi to be reachable at all.
+#if CONFIG_RGNSS_RADIO_SWITCH_OPEN_IS_BLE
+#define BLE_LEVEL 1
+#else
+#define BLE_LEVEL 0
+#endif
 static bool wifi_forced;  // this boot is on WiFi although the switch said BLE
 
 // Commands arrive on RX as lines, possibly split over several writes; the
@@ -617,12 +625,13 @@ static void switch_poll(void *arg)
     if (gpio_get_level(CONFIG_RGNSS_RADIO_SWITCH_GPIO) == boot_level) {
         steady = 0;
     } else if (++steady >= SWITCH_STEADY) {
-        ESP_LOGI(TAG, "radio switch moved; restarting on %s", boot_level ? "WiFi" : "BLE");
+        ESP_LOGI(TAG, "radio switch moved; restarting on %s", boot_level == BLE_LEVEL ? "WiFi" : "BLE");
         esp_restart();
     }
 }
 
-// The switch closes to ground: on (low) is WiFi, off (pulled high) is BLE.
+// The switch closes to ground. On the puck closed (low) is WiFi and open
+// (pulled high) is BLE; BLE_LEVEL says which way round this build has it.
 bool nmea_ble_boot_mode(void)
 {
     gpio_config_t io = {
@@ -640,8 +649,8 @@ bool nmea_ble_boot_mode(void)
         esp_timer_start_periodic(timer, SWITCH_POLL_MS * 1000) != ESP_OK) {
         ESP_LOGE(TAG, "can't watch the radio switch; flipping it takes a restart");
     }
-    ESP_LOGI(TAG, "radio switch on GPIO%d is %s: %s", CONFIG_RGNSS_RADIO_SWITCH_GPIO, boot_level ? "off" : "on",
-             boot_level ? "BLE" : "WiFi");
+    ESP_LOGI(TAG, "radio switch on GPIO%d is %s: %s", CONFIG_RGNSS_RADIO_SWITCH_GPIO,
+             boot_level ? "open" : "closed", boot_level == BLE_LEVEL ? "BLE" : "WiFi");
     // This boot only: the flag is spent here, so a restart or a power cycle
     // goes back to the switch. And switch_poll() still compares against
     // boot_level, so flipping the switch either way ends it too.
@@ -649,15 +658,15 @@ bool nmea_ble_boot_mode(void)
     wifi_this_boot = 0;
     if (forced == WIFI_THIS_BOOT_MAGIC) {
         ESP_LOGW(TAG, "BLE failed to start last time: WiFi gets this boot");
-        wifi_forced = boot_level != 0;
+        wifi_forced = boot_level == BLE_LEVEL;
         return false;
     }
     if (forced == WIFI_ASKED_MAGIC) {
         ESP_LOGW(TAG, "WiFi asked for over BLE: WiFi gets this boot, until the switch moves");
-        wifi_forced = boot_level != 0;
+        wifi_forced = boot_level == BLE_LEVEL;
         return false;
     }
-    return boot_level != 0;
+    return boot_level == BLE_LEVEL;
 }
 
 // A half-started BLE stack holds the radio and its heap, and tearing it down

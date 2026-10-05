@@ -22,6 +22,18 @@ static bool wifi_ok(int q)
     return q >= 8 && q <= 80;
 }
 
+#if CONFIG_IDF_TARGET_ESP32
+// The ESP32's controller: -12 dBm is level 0, then 3 dB a level, up to +9 dBm
+// at 7.
+static bool ble_level(int dbm, esp_power_level_t *out)
+{
+    if (dbm < 0 || dbm > RADIO_POWER_BLE_MAX_DBM || dbm % 3 != 0) {
+        return false;
+    }
+    *out = (esp_power_level_t)((dbm + 12) / 3);
+    return true;
+}
+#else
 // The controller's levels: -24 dBm is level 0, then 3 dB a level, up to +18
 // dBm at 14; level 15 is +20.
 static bool ble_level(int dbm, esp_power_level_t *out)
@@ -36,6 +48,7 @@ static bool ble_level(int dbm, esp_power_level_t *out)
     *out = (esp_power_level_t)((dbm + 24) / 3);
     return true;
 }
+#endif
 
 float radio_power_wifi_dbm(void)
 {

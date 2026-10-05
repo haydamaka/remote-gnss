@@ -16,13 +16,13 @@ typedef struct {
     // whatever the link was set to last time.
     int default_baud;
 
-    // Called from the reader task once a sentence has checksummed, so the
-    // receiver is known to be present and listening. Sends whatever
-    // configuration it needs, and returns the rate the link should run at
-    // afterwards, or 0 to leave it where it is. Called again after every
+    // Called from the reader task once a sentence or a UBX frame has
+    // checksummed at `baud`, so the receiver is known to be present and
+    // listening. Sends whatever configuration it needs, and returns the rate
+    // the link should run at afterwards, or 0 to leave it where it is. Called again after every
     // re-lock: a receiver that lost power lost its settings with it. May be
     // NULL, for one that arrives set up the way this firmware wants it.
-    int (*configure)(void);
+    int (*configure)(int baud);
 
     // Called for every UBX frame that passes its checksum, apart from the
     // NAV-STATUS reply gnss.c reads itself. The payload is truncated to the

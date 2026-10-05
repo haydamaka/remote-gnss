@@ -18,9 +18,16 @@
 #include "minmea.h"
 #include "nmea_hub.h"
 #include "nvs.h"
+#include "soc/soc_caps.h"
 #include "waypoint.h"
 
+// UART0 is the console on both chips. The ESP32 has a third, which its boards
+// label RX2/TX2 on GPIO 16/17; the C3 has only UART1.
+#if SOC_UART_HP_NUM > 2
+#define GNSS_UART UART_NUM_2
+#else
 #define GNSS_UART UART_NUM_1
+#endif
 #define UART_RX_BUF_SIZE 2048
 #define NO_DATA_WARN_US (5 * 1000 * 1000)
 #define STATUS_POLL_US (2 * 1000 * 1000)
@@ -351,6 +358,15 @@ static void send_receiver_config(void)
     uart_write_bytes(GNSS_UART, msg, n);
 }
 
+// NMEA sentences that carried a checksum and passed it, and UBX frames that
+// passed theirs. The baud hunt locks on this rather than on data.sentences,
+// because minmea's lax mode accepts a sentence with no checksum at all - so
+// seven plausible bytes of framing garbage at the wrong rate would otherwise
+// end the search there for good. UBX counts because a receiver can be set to
+// send nothing else: the F9P this was first tried on came UBX only, at
+// 460800, and it is configure() that turns NMEA on.
+static uint32_t checksummed;
+
 // Feeds one byte to the UBX side of the stream. NMEA and UBX share the wire.
 static void feed_ubx(uint8_t b)
 {
@@ -385,6 +401,7 @@ static void feed_ubx(uint8_t b)
         if (b != ck_b) {
             return;
         }
+        checksummed++;
         if (cls == 0x01 && id == 0x07 && len >= 72) {
             // flags (byte 21) bit 0 is gnssFixOK; sAcc is bytes 68-71, mm/s.
             uint32_t sacc = buf[68] | buf[69] << 8 | buf[70] << 16 | (uint32_t)buf[71] << 24;
@@ -489,11 +506,6 @@ static void check_plausible(double lat, double lon, const char *utc)
     taskEXIT_CRITICAL(&lock);
 }
 
-// Sentences that carried a checksum and passed it. The baud hunt locks on this
-// rather than on data.sentences, because minmea's lax mode accepts a sentence
-// with no checksum at all - so seven plausible bytes of framing garbage at the
-// wrong rate would otherwise end the search there for good.
-static uint32_t checksummed;
 
 static void handle_sentence(const char *line)
 {
@@ -741,7 +753,7 @@ static void reader_task(void *arg)
                 // Now that the receiver has proved it is there, tell it how we
                 // want it. A receiver that has been power-cycled has forgotten,
                 // so this runs after every re-lock, not once per boot.
-                int baud = gnss_receiver.configure ? gnss_receiver.configure() : 0;
+                int baud = gnss_receiver.configure ? gnss_receiver.configure(data.baud) : 0;
                 if (baud && baud != data.baud) {
                     ESP_LOGI(TAG, "moving the link to %d baud", baud);
                     uart_wait_tx_done(GNSS_UART, pdMS_TO_TICKS(1000));
@@ -991,8 +1003,8 @@ esp_err_t gnss_start(void)
                                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE), TAG, "set pins");
     ESP_RETURN_ON_FALSE(xTaskCreate(reader_task, "gnss", 4096, NULL, 5, NULL) == pdPASS, ESP_ERR_NO_MEM,
                         TAG, "create task");
-    ESP_LOGI(TAG, "%s on UART1 (RX GPIO%d, TX GPIO%d), starting at %d baud", gnss_receiver.name,
-             CONFIG_RGNSS_GNSS_RX_GPIO, CONFIG_RGNSS_GNSS_TX_GPIO, data.baud);
+    ESP_LOGI(TAG, "%s on UART%d (RX GPIO%d, TX GPIO%d), starting at %d baud", gnss_receiver.name,
+             GNSS_UART, CONFIG_RGNSS_GNSS_RX_GPIO, CONFIG_RGNSS_GNSS_TX_GPIO, data.baud);
     return ESP_OK;
 }
 
@@ -1014,7 +1026,9 @@ void gnss_get(gnss_data_t *out)
     }
     // Likewise an accuracy figure: GST can stop while GGA carries on, and a
     // centimetre left on the page would be the most misleading number on it.
-    if (!out->accuracy_us || now - out->accuracy_us > STALE_US) {
+    // Without a fix the F9P still sends GST, with an error in the thousands of
+    // kilometres; that says no more than "no fix" does.
+    if (!out->accuracy_us || now - out->accuracy_us > STALE_US || out->fix_quality == 0) {
         out->accuracy_m = NAN;
     }
 }
