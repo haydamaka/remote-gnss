@@ -25,9 +25,10 @@ idf.py build
 idf.py -p /dev/ttyACM0 flash
 ```
 
-The WROOM + ZED-F9P build (see SPEC.md, "The WROOM build") goes to its own
-directory: `idf.py -B build-wroom -D SDKCONFIG=sdkconfig.wroom -D IDF_TARGET=esp32 build`,
-flashed on `/dev/ttyUSB0`, reachable as `haydamaka-f9p-gnss.local`.
+Board and receiver are separate build parameters; README.md, "Build
+parameters", has the table and a command per combination. The WROOM + ZED-F9P
+board builds into `build-wroom-f9p`, flashes on `/dev/ttyUSB0` and answers as
+`haydamaka-f9p-gnss.local`.
 
 The SuperMini enumerates as `/dev/ttyACM0`. Opening that port resets it, so wait
 for it to rejoin WiFi before driving it over the network.

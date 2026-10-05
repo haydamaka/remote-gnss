@@ -6,9 +6,9 @@ module. It serves the position and magnetometer readings on a web page over WiFi
 ## Platform
 
 - ESP32-C3 SuperMini, ESP-IDF v5.5, running on FreeRTOS (ESP-IDF's).
-- A second build for an ESP32-WROOM-32 DevKit with the ZED-F9P: the same
-  firmware, target `esp32`, built into `build-wroom` with its own
-  `sdkconfig.wroom` (see "The WROOM build" below).
+- Or an ESP32-WROOM-32 DevKit: the same firmware, target `esp32`. Board and
+  receiver are two independent build parameters; README.md has the table and
+  the commands. The default is the C3 with the WS-M181.
 - Settings are kept in NVS.
 
 ## Hardware
@@ -82,27 +82,24 @@ antenna; an NTRIP client to supply them is not written yet.
 Wiring is the same four lines as the WS-M181 — 5V, GND, the receiver's TX to
 GPIO 4 and its RX to GPIO 3 — minus the I2C pair.
 
-### The WROOM build
+### The WROOM board
 
 An ESP32-WROOM-32 DevKit (ESP32-D0WD-V3, 4 MB flash, CH340 USB bridge on
-`/dev/ttyUSB0`) with the ZED-F9P. Selecting the `esp32` target changes the
-defaults in `main/Kconfig.projbuild`; `sdkconfig.defaults.esp32` holds only
-the Bluetooth controller settings.
+`/dev/ttyUSB0`), so far with the ZED-F9P. Selecting the `esp32` target changes
+the board defaults in `main/Kconfig.projbuild`; `sdkconfig.defaults.esp32`
+holds only the Bluetooth controller settings. The receiver is chosen apart from
+the board, with `sdkconfig.f9p` (README.md, "Build parameters").
 
 | | SuperMini (esp32c3) | WROOM (esp32) |
 |---|---|---|
-| Receiver | WS-M181 | ZED-F9P |
 | GNSS UART | UART1, RX 4 / TX 3 | UART2, RX 16 / TX 17 |
 | Magnetometer I2C | SDA 1 / SCL 0 | SDA 21 / SCL 22 |
 | LED | GPIO 8, lit low | GPIO 2, lit high |
 | Radio switch | GPIO 10; open is BLE | GPIO 27; open (none fitted) is WiFi, grounded is BLE |
-| Hostname and AP | `haydamaka-puck-gnss` | `haydamaka-f9p-gnss` |
 | BLE power | 0-20 dBm | 0-9 dBm, the ESP32's ceiling |
 
-```sh
-idf.py -B build-wroom -D SDKCONFIG=sdkconfig.wroom -D IDF_TARGET=esp32 build
-idf.py -B build-wroom -p /dev/ttyUSB0 flash
-```
+The hostname and access point follow the receiver instead:
+`haydamaka-f9p-gnss` with the F9P, `haydamaka-puck-gnss` with the WS-M181.
 
 The F9P board draws enough, with its active antenna, that powering it from the
 DevKit's USB 5V pin dropped the board off USB entirely. Give it its own supply

@@ -1,6 +1,7 @@
-# The WROOM board with the ZED-F9P. Read after sdkconfig.defaults when the
-# target is esp32, so only what differs from the C3 is here; the receiver, the
-# pins and the hostname follow the target in main/Kconfig.projbuild.
+# The ESP32-WROOM DevKit board. Read after sdkconfig.defaults when the
+# target is esp32, so only what differs from the C3 is here; the pins and the
+# LED follow the target in main/Kconfig.projbuild. The receiver is separate:
+# see sdkconfig.f9p.
 
 # BLE only. The ESP32 has Bluetooth Classic, but nothing here uses it, and the
 # dual-mode controller holds on to memory WiFi wants.

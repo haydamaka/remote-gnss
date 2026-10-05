@@ -4,7 +4,7 @@ menu "Remote GNSS"
 
         config RGNSS_AP_SSID
             string "Access point name"
-            default "haydamaka-f9p-gnss" if IDF_TARGET_ESP32
+            default "haydamaka-f9p-gnss" if RGNSS_GNSS_F9P
             default "haydamaka-puck-gnss"
             help
                 Open (passwordless) access point the device brings up when it has no
@@ -31,7 +31,7 @@ menu "Remote GNSS"
 
     config RGNSS_HOSTNAME
         string "mDNS hostname (without .local)"
-        default "haydamaka-f9p-gnss" if IDF_TARGET_ESP32
+        default "haydamaka-f9p-gnss" if RGNSS_GNSS_F9P
         default "haydamaka-puck-gnss"
         help
             A single label: ESP-IDF's mDNS responder writes a dotted name such as
@@ -71,7 +71,6 @@ menu "Remote GNSS"
 
         choice RGNSS_GNSS_RECEIVER
             prompt "Receiver"
-            default RGNSS_GNSS_F9P if IDF_TARGET_ESP32
             default RGNSS_GNSS_WS181
             help
                 Which receiver this firmware is built for. It decides the rate

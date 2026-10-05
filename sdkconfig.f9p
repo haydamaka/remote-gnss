@@ -1,0 +1,3 @@
+# The receiver parameter: add this file to SDKCONFIG_DEFAULTS to build for the
+# u-blox ZED-F9P instead of the Walksnail WS-M181. Works with either board.
+CONFIG_RGNSS_GNSS_F9P=y

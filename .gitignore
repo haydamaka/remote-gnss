@@ -11,5 +11,5 @@ __pycache__/
 !.idea/cmake.xml
 .claude/
 build-*/
-sdkconfig.wroom
-sdkconfig.wroom.old
+# One sdkconfig per board and receiver, e.g. sdkconfig.wroom-f9p
+sdkconfig.*-*
